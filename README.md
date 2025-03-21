@@ -1,7 +1,7 @@
-# Cobra - Video Analysis System
+# Video Scribe - Video Analysis System
 
 ## Skill Description
-Cobra is an advanced AI-powered video analysis system that extracts detailed metadata from video content. It provides rich, structured information about scenes, objects, people, actions, and emotions, enabling comprehensive cataloging and search capabilities for video content.
+Video Scribe is an advanced AI-powered video analysis system that extracts detailed metadata from video content. It provides rich, structured information about scenes, objects, people, actions, and emotions, enabling comprehensive cataloging and search capabilities for video content.
 
 ## Goal of the Pipeline
 The goal is to transform raw video files into structured JSON metadata that describes the content in detail, with precise timestamped segments for better searchability and understanding.
@@ -180,12 +180,6 @@ The system employs a parallelized processing approach to handle videos of any le
 - Self-healing mechanism for handling transient API failures
 
 ## Installation and Setup
-
-1. Clone the repository:
-```
-git clone https://github.com/your-username/cobra.git
-cd cobra
-```
 
 2. Install dependencies:
 ```
