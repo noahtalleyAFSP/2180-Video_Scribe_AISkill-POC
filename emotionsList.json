@@ -1,0 +1,45 @@
+{
+    "instructions": "Analyze each video segment for the following emotions and report them in the emotions field. Be specific about the emotions detected, noting intensity levels and context where possible. Only include emotions that are clearly present in the segment.",
+    "emotions": [
+        {
+            "name": "Joy",
+            "description": "Expressions of happiness, delight, elation, or pleasure. Look for smiles, laughter, and celebrating."
+        },
+        {
+            "name": "Sadness",
+            "description": "Expressions of unhappiness, disappointment, or grief. Look for frowns, tears, or slumped posture."
+        },
+        {
+            "name": "Anger",
+            "description": "Expressions of frustration, rage, or irritation. Look for furrowed brows, clenched fists, or aggressive gestures."
+        },
+        {
+            "name": "Fear",
+            "description": "Expressions of anxiety, worry, or terror. Look for wide eyes, trembling, or defensive postures."
+        },
+        {
+            "name": "Surprise",
+            "description": "Expressions of astonishment or shock. Look for raised eyebrows, open mouths, or sudden reactions."
+        },
+        {
+            "name": "Disgust",
+            "description": "Expressions of revulsion or distaste. Look for wrinkled noses, turned down mouths, or recoiling movements."
+        },
+        {
+            "name": "Contempt",
+            "description": "Expressions of disdain, scorn, or superiority. Look for one-sided smirks or dismissive gestures."
+        },
+        {
+            "name": "Confusion",
+            "description": "Expressions of bewilderment or uncertainty. Look for furrowed brows, head tilting, or hesitant movements."
+        },
+        {
+            "name": "Excitement",
+            "description": "Expressions of enthusiasm or eagerness. Look for animated gestures, wide eyes, or energetic movements."
+        },
+        {
+            "name": "Determination",
+            "description": "Expressions of resolve or focus. Look for intense concentration, set jaws, or purposeful movements."
+        }
+    ]
+} 
