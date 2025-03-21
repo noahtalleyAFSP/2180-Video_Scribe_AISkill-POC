@@ -259,7 +259,7 @@ The Video Analysis System is an advanced computer vision and AI-powered tool des
 ## DATA MODEL
 
 ### Video Manifest Structure
-
+### The action summary is the main output we are looking for, this additional information will not be used in the video scribe skill itself, but may end up in AI Log.
 The video manifest is the primary output, containing metadata and analysis results:
 
 ```json
