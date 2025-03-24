@@ -1,7 +1,7 @@
-# Video Scribe - Video Analysis System
+# Video Scribe - Advanced Video Analysis System
 
 ## Skill Description
-Video Scribe is an advanced AI-powered video analysis system that extracts detailed metadata from video content. It provides rich, structured information about scenes, objects, people, actions, and emotions, enabling comprehensive cataloging and search capabilities for video content.
+Video Scribe is an advanced AI-powered video analysis system that extracts detailed metadata from video content. It provides rich, structured information about scenes, objects, people, actions, emotions, and themes, enabling comprehensive cataloging and search capabilities for video content.
 
 ## Goal of the Pipeline
 The goal is to transform raw video files into structured JSON metadata that describes the content in detail, with precise timestamped segments for better searchability and understanding.
@@ -22,6 +22,10 @@ Options:
   --face-model        Azure Face API person group ID for custom face recognition
   --peoples-list      Path to a JSON file containing people to identify in the video
   --emotions-list     Path to a JSON file containing emotions to detect in the video
+  --objects-list      Path to a JSON file containing objects to detect in the video
+  --themes-list       Path to a JSON file containing themes to classify in the video
+  --actions-list      Path to a JSON file containing actions to detect in the video
+  --lens              Path to a JSON file containing a custom analysis lens
   --fps               Frames per second to extract (default: 0.33)
   --segment-length    Length of video segments in seconds (default: 10)
 ```
@@ -63,6 +67,64 @@ Options:
             "description": "Expressions of enthusiasm or eagerness. Look for animated gestures, wide eyes, or energetic movements."
         }
     ]
+}
+```
+
+#### objects_list.json (Optional)
+```json
+{
+    "instructions": "Identify the following objects in the video frames and include them in the objects field.",
+    "objects": [
+        {
+            "name": "Basketball",
+            "description": "Orange spherical ball used in the game, typically with black lines/grooves"
+        },
+        {
+            "name": "Basketball Court",
+            "description": "Wooden floor with markings including three-point line, free throw line, and center circle"
+        }
+    ]
+}
+```
+
+#### themes_list.json (Optional)
+```json
+{
+    "instructions": "Identify the overall theme of each video segment from the following list.",
+    "themes": [
+        {
+            "name": "Fast-Paced Action",
+            "description": "Rapid movement, high energy plays, quick transitions"
+        },
+        {
+            "name": "Strategic Play",
+            "description": "Deliberate positioning, planned movements, tactical decision-making"
+        }
+    ]
+}
+```
+
+#### actions_list.json (Optional)
+```json
+{
+    "instructions": "Identify specific basketball actions occurring in the video frames.",
+    "actions": [
+        {
+            "name": "Jump Shot",
+            "description": "Player jumps and shoots the ball with proper form and follow-through"
+        },
+        {
+            "name": "Layup",
+            "description": "Player approaches the basket and gently lays the ball off the backboard or directly into the hoop"
+        }
+    ]
+}
+```
+
+#### lens.json (Optional)
+```json
+{
+    "lens": "You are a sportscaster renowned for your entertaining play-call style. Use energetic, colorful language and sports-specific terminology. Emphasize dramatic moments and player achievements with excitement."
 }
 ```
 
@@ -144,6 +206,8 @@ The system produces a structured JSON output with detailed information about the
         "personNames": "LeBron James, Austin Reaves",
         "peoples": ["LeBron James", "Austin Reaves"],
         "emotions": ["Excitement", "Determination"],
+        "objects": ["Basketball", "Basketball Court", "Lakers Jersey"],
+        "actions": ["Jump Shot", "Rebound", "Pass"],
         "summary": "LeBron James drives toward the basket with determination while Austin Reaves positions himself near the three-point line. The crowd cheers enthusiastically as the Lakers execute their offensive play.",
         "actions": "LeBron dribbles the ball forcefully, transitions into a driving maneuver toward the basket, while Reaves performs a cutting motion toward the open space.",
         "objects": "Basketball (orange), Lakers jerseys (purple and gold), court (polished wood with team logos), digital scoreboard displaying game time and score."
@@ -156,6 +220,8 @@ The system produces a structured JSON output with detailed information about the
         "personNames": "LeBron James",
         "peoples": ["LeBron James", "Austin Reaves"],
         "emotions": ["Concentration", "Determination"],
+        "objects": ["Basketball", "Basketball Court", "Scoreboard"],
+        "actions": ["Pass", "Defensive Stance", "Screen"],
         "summary": "The play continues with strategic positioning. LeBron passes the ball while teammates adjust their formation on the court.",
         "actions": "LeBron executes a precise chest pass, players shift positions according to their offensive strategy, defensive players attempt to intercept.",
         "objects": "Basketball, players in various colored jerseys, referee in black and white striped uniform, court markings clearly visible."
@@ -179,7 +245,25 @@ The system employs a parallelized processing approach to handle videos of any le
 - Smart chunking ensures complete context preservation at segment boundaries
 - Self-healing mechanism for handling transient API failures
 
+## Custom Analysis Lens
+
+The lens feature allows you to completely customize the analysis style by providing a specific perspective or voice through which the video is analyzed. This doesn't change the output structure but influences how the content is described and what aspects are emphasized.
+
+Examples of lens applications:
+- Sports commentator style
+- Technical analysis focus
+- Cinematic/film criticism perspective
+- Educational/instructional emphasis
+
+The lens is applied at the system level but doesn't appear in the final JSON output - it only affects how the system interprets and describes the video content.
+
 ## Installation and Setup
+
+1. Clone the repository:
+```
+git clone https://github.com/your-username/video-scribe.git
+cd video-scribe
+```
 
 2. Install dependencies:
 ```
@@ -190,7 +274,7 @@ pip install -r requirements.txt
 
 4. Run the analysis:
 ```
-python analyze_video.py path/to/your/video.mp4 --face-model your_face_model_id --peoples-list peoples_list.json --emotions-list emotions_list.json
+python analyze_video.py path/to/your/video.mp4 --face-model your_face_model_id --peoples-list peoplesList.json --emotions-list emotionsList.json --objects-list objectsList.json --themes-list themesList.json --actions-list actionsList.json --lens lens.json
 ```
 
 ## Requirements
@@ -202,7 +286,7 @@ python analyze_video.py path/to/your/video.mp4 --face-model your_face_model_id -
 
 ## OVERVIEW
 
-The Video Analysis System is an advanced computer vision and AI-powered tool designed to extract meaningful insights from video content. The system leverages Azure's Face API for face recognition, OpenAI's vision models for scene understanding, and custom processing for temporal analysis. It analyzes video files frame-by-frame to detect people, identify objects, interpret actions, and provide temporal summaries of content. The system outputs structured JSON data that catalogues who appears in the video, what is happening in each scene, notable objects, sentiment, and thematic elements, making it ideal for content cataloguing, video indexing, and automated description generation.
+Video Scribe is an advanced computer vision and AI-powered tool designed to extract meaningful insights from video content. The system leverages Azure's Face API for face recognition, OpenAI's vision models for scene understanding, and custom processing for temporal analysis. It analyzes video files frame-by-frame to detect people, identify objects, interpret actions, and provide temporal summaries of content. The system outputs structured JSON data that catalogues who appears in the video, what is happening in each scene, notable objects, sentiment, and thematic elements, making it ideal for content cataloguing, video indexing, and automated description generation.
 
 ## WORKFLOW
 
@@ -224,9 +308,11 @@ The Video Analysis System is an advanced computer vision and AI-powered tool des
      - Action recognition
      - Contextual interpretation 
      - Theme categorization
+     - Emotion detection
+     - Custom object tracking
 
 4. **Temporal Mapping**:
-   - Analyses are mapped to specific timestamps
+   - Analyses are mapped to specific timestamps with millisecond precision (e.g., "10.023s")
    - Face recognition data is aligned with timestamps
    - Identified people are associated with specific time segments
 
@@ -241,19 +327,19 @@ The Video Analysis System is an advanced computer vision and AI-powered tool des
 |-----------|-------------|---------|---------|
 | `video_file` | Path to input video file | (Required) | "C:\path\to\video.mp4" |
 | `--face-model` | Custom face group ID for recognition | None | "custom_c72ed963" |
+| `--peoples-list` | JSON file with people to identify | None | "peoplesList.json" |
+| `--emotions-list` | JSON file with emotions to detect | None | "emotionsList.json" |
+| `--objects-list` | JSON file with objects to identify | None | "objectsList.json" |
+| `--themes-list` | JSON file with themes to classify | None | "themesList.json" |
+| `--actions-list` | JSON file with actions to detect | None | "actionsList.json" |
+| `--lens` | Custom analysis perspective | None | "lens.json" |
 | `--fps` | Frame extraction rate | 0.33 | 1.0 |
-| `--segment-duration` | Duration of each segment in seconds | 10.0 | 5.0 |
-| `--output-dir` | Directory for output files | Based on video filename | "./output_folder" |
-| `--skip-analyzed` | Skip already analyzed segments | False | True |
-| `--vision-api-base` | Base URL for vision API | Environment variable | "https://api.com" |
-| `--vision-api-key` | API key for vision services | Environment variable | "key123abc" |
-| `--face-api-key` | Azure Face API key | Environment variable | "facekey456def" |
-| `--face-api-endpoint` | Azure Face API endpoint | Environment variable | "https://face.api.com" |
+| `--segment-length` | Segment duration in seconds | 10 | 30 |
 
 ## DATA MODEL
 
 ### Video Manifest Structure
-### The action summary is the main output we are looking for, this additional information will not be used in the video scribe skill itself, but may end up in AI Log.
+
 The video manifest is the primary output, containing metadata and analysis results:
 
 ```json
@@ -500,7 +586,3 @@ trademarks or logos is subject to and must follow
 [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
 Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
 Any use of third-party trademarks or logos are subject to those third-party's policies.
-
-
-
-## change characters to persons

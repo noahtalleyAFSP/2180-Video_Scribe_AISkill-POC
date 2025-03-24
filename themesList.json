@@ -1,0 +1,45 @@
+{
+    "instructions": "Identify the overall theme of each video segment from the following list. Consider the mood, context, and purpose of the scene when making your selection.",
+    "themes": [
+        {
+            "name": "Fast-Paced Action",
+            "description": "Rapid movement, high energy plays, quick transitions"
+        },
+        {
+            "name": "Strategic Play",
+            "description": "Deliberate positioning, planned movements, tactical decision-making"
+        },
+        {
+            "name": "Celebratory Moment",
+            "description": "Victory celebrations, high-fives, crowd cheering, excitement"
+        },
+        {
+            "name": "Tense Standoff",
+            "description": "Close game situations, high pressure moments, focused intensity"
+        },
+        {
+            "name": "Team Coordination",
+            "description": "Synchronized movements, passing sequences, well-executed plays"
+        },
+        {
+            "name": "Individual Brilliance",
+            "description": "Standout performance by a single player, highlight-reel moves"
+        },
+        {
+            "name": "Coaching Moment",
+            "description": "Instruction from coaches, team huddles, strategic discussions"
+        },
+        {
+            "name": "Official Review",
+            "description": "Referee decisions, replay reviews, rule explanations"
+        },
+        {
+            "name": "Injury Concern",
+            "description": "Player down, medical attention, concerned reactions"
+        },
+        {
+            "name": "Crowd Interaction",
+            "description": "Players engaging with fans, crowd reactions, audience participation"
+        }
+    ]
+} 
