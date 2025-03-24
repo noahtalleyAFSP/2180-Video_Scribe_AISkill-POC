@@ -1,0 +1,78 @@
+{
+    "Chapter 1: Kitchen Preparation": {
+        "title": "Chapter 1: Kitchen Preparation",
+        "start_frame": "0.0s",
+        "end_frame": "60.0s",
+        "scenes": [
+            {
+                "title": "Scene 1: Opening Credits",
+                "description": "The video begins with opening credits, displaying text such as 'A Show Don't Tell Short Film' and 'Written & Directed by Vincent Bossel'."
+            },
+            {
+                "title": "Scene 2: Chef in the Kitchen",
+                "description": "A chef in a white uniform and hat is seen standing in a modern kitchen, preparing vegetables at the sink."
+            },
+            {
+                "title": "Scene 3: Cleaning Ingredients",
+                "description": "The chef is washing grapes under running water at the sink, focusing on food preparation."
+            },
+            {
+                "title": "Scene 4: Cutting and Garnishing",
+                "description": "The chef is seen finely chopping herbs and preparing ingredients, including slicing a grape and adding seasoning, displaying precision in preparation."
+            },
+            {
+                "title": "Scene 5: Final Touches",
+                "description": "The chef holds up a piece of paper tape, potentially indicating measurement or presentation, and examines a bowl closely, demonstrating attention to detail."
+            }
+        ]
+    },
+    "Chapter 2: Presentation": {
+        "title": "Chapter 2: Presentation",
+        "start_frame": "60.0s",
+        "end_frame": "90.0s",
+        "scenes": [
+            {
+                "title": "Scene 1: Setting the Table",
+                "description": "The chef stands in front of a bowl on a reflective surface in dim lighting."
+            },
+            {
+                "title": "Scene 2: Entering the Dining Room",
+                "description": "The chef enters a dark room holding a covered dish, walking towards a table with a person sitting at it, illuminated by candlelight."
+            },
+            {
+                "title": "Scene 3: Holding the Dish",
+                "description": "Close-up of the chef's hand holding the dish in a poised manner, ready to serve."
+            }
+        ]
+    },
+    "Chapter 3: Contemplation": {
+        "title": "Chapter 3: Contemplation",
+        "start_frame": "90.0s",
+        "end_frame": "159.0s",
+        "scenes": [
+            {
+                "title": "Scene 1: Introspection",
+                "description": "A person is seen sitting shirtless in a dimly lit room with candles, appearing to be in a contemplative state."
+            },
+            {
+                "title": "Scene 2: Amidst the Smoke",
+                "description": "Smoke surrounds the person who is holding a cigarette, suggesting a moment of solitude and reflection."
+            },
+            {
+                "title": "Scene 3: Pensive Mood",
+                "description": "The person sits by a sink, smoke fills the space, and they appear deep in thought, gesturing with their hands."
+            }
+        ]
+    },
+    "Chapter 4: Credits": {
+        "title": "Chapter 4: Credits",
+        "start_frame": "162.0s",
+        "end_frame": "177.0s",
+        "scenes": [
+            {
+                "title": "Scene 1: Acknowledgements",
+                "description": "The credits roll on a black screen, acknowledging the cook and production team."
+            }
+        ]
+    }
+}
