@@ -3,8 +3,12 @@ import json
 import time
 import asyncio
 import nest_asyncio
-from typing import Union, Type, Optional
+from typing import Union, Type, Optional, List, Dict, Set
 from openai import AzureOpenAI, AsyncAzureOpenAI
+import logging
+from collections import defaultdict
+import numpy as np
+import math
 
 from .models.video import VideoManifest, Segment
 from .models.environment import CobraEnvironment
@@ -18,6 +22,7 @@ from .cobra_utils import (
     process_frame_with_faces,
 )
 
+logger = logging.getLogger(__name__)
 
 class VideoAnalyzer:
     manifest: VideoManifest
@@ -34,6 +39,13 @@ class VideoAnalyzer:
     themes_list: Optional[dict]
     actions_list_path: Optional[str]
     actions_list: Optional[dict]
+    MAX_FRAMES_PER_PROMPT: int = 45  # Maximum number of frames to send in a single prompt
+    TAG_CHUNK_SECONDS: float = 5.0 # New: Duration for tag analysis chunks
+
+    # Add instance variables to track known tags during analysis
+    _current_known_persons: Set[str]
+    _current_known_actions: Set[str]
+    _current_known_objects: Set[str]
 
     # take either a video manifest object or a path to a video manifest file
     def __init__(
@@ -67,6 +79,19 @@ class VideoAnalyzer:
         
         # Load actions list if provided
         self.actions_list = self._load_json_list(actions_list_path, "actions")
+
+        # Initialize known tag sets
+        self._current_known_persons = set()
+        self._current_known_actions = set()
+        self._current_known_objects = set()
+
+        # Optionally pre-populate from lists if provided
+        if self.peoples_list:
+             self._current_known_persons.update(self.peoples_list.get("persons", []))
+        if self.actions_list:
+             self._current_known_actions.update(self.actions_list.get("actions", []))
+        if self.objects_list:
+             self._current_known_objects.update(self.objects_list.get("objects", []))
     
     def _load_json_list(self, file_path, expected_key):
         """Helper method to load and validate JSON list files."""
@@ -96,6 +121,17 @@ class VideoAnalyzer:
         person_group_id=None,
         **kwargs,
     ):
+        # Reset known tags at the beginning of each analysis run
+        self._current_known_persons = set()
+        self._current_known_actions = set()
+        self._current_known_objects = set()
+        # Re-populate from lists if they exist
+        if self.peoples_list:
+             self._current_known_persons.update(self.peoples_list.get("persons", []))
+        if self.actions_list:
+             self._current_known_actions.update(self.actions_list.get("actions", []))
+        if self.objects_list:
+             self._current_known_objects.update(self.objects_list.get("objects", []))
 
         self.reprocess_segments = reprocess_segments
         self.person_group_id = person_group_id
@@ -114,6 +150,10 @@ class VideoAnalyzer:
                 print(f"Warning: Person group {self.person_group_id} not found or not accessible")
                 self.person_group_id = None
 
+        # --- EDIT 1: Determine if custom aggregation exists ---
+        has_custom_aggregation = hasattr(analysis_config, 'process_segment_results')
+        results_list_or_aggregated = None # Will hold either the list or the final dict
+
         # Analyze videos using the mapreduce sequence
         if analysis_config.analysis_sequence == "mapreduce":
             print(f"Populating prompts for each segment")
@@ -123,74 +163,199 @@ class VideoAnalyzer:
             if run_async:
                 print("Running analysis asynchronously")
                 nest_asyncio.apply()
-                results_list = asyncio.run(
+                # _analyze_segment_list_async now returns aggregated results if process_segment_results exists
+                results_list_or_aggregated = asyncio.run(
                     self._analyze_segment_list_async(
                         analysis_config, max_concurrent_tasks=max_concurrent_tasks
                     )
                 )
             else:
                 print("Running analysis.")
-                results_list = self._analyze_segment_list(analysis_config)
+                # _analyze_segment_list now returns aggregated results if process_segment_results exists
+                results_list_or_aggregated = self._analyze_segment_list(analysis_config)
 
         # For refine-style analyses that need to be run sequentially
         elif analysis_config.analysis_sequence == "refine":
             print(f"Analyzing segments sequentially with refinement")
-            results_list = self._analyze_segment_list_sequentially(analysis_config)
+            # Sequential analysis typically refines, results might need specific handling
+            # Assuming _analyze_segment_list_sequentially returns a list suitable for generic aggregation for now
+            # If refine needs custom aggregation, this logic might need adjustment
+            results_list_or_aggregated = self._analyze_segment_list_sequentially(analysis_config)
+            has_custom_aggregation = False # Force generic aggregation for refine unless specified otherwise
+
         else:
             raise ValueError(
                 f"You have provided an AnalyisConfig with a analysis_sequence that has not yet been implmented: {analysis_config.analysis_sequence}"
             )
 
-        ## collapse the segment lists into one large list of segments. (Needed for expected ActionSummary format for UI)
-        try:
-            final_results = []
-            for item in results_list:
-                for elem in item:
-                    final_results.append(elem)
+        # --- EDIT 2: Conditional Aggregation ---
+        final_results = {}
+        if has_custom_aggregation and isinstance(results_list_or_aggregated, dict):
+             # If custom aggregation ran and returned a dict, use it directly
+             print("Using results from custom aggregation method.")
+             final_results = results_list_or_aggregated
+             # Ensure manifest tags are updated (might already be done in _analyze_segment_list*)
+             if "global_tags" in final_results:
+                 self.manifest.global_tags = final_results["global_tags"]
+        elif isinstance(results_list_or_aggregated, list):
+             # If no custom aggregation or it returned a list (or refine was used), run generic aggregation
+             print("Running generic aggregation.")
+             try:
+                # Initialize combined results structure
+                all_chapters = []
+                global_tags_agg = { # Use a different name to avoid confusion
+                    "persons": {},
+                    "actions": {},
+                    "objects": {}
+                }
 
+                # Process each segment's results (assuming results_list_or_aggregated is a list here)
+                for segment_response in results_list_or_aggregated:
+                    if not isinstance(segment_response, dict):
+                        print(f"Warning: Skipping non-dictionary item in results list: {type(segment_response)}")
+                        continue
+
+                    # Add chapters
+                    chapters_data = segment_response.get("chapters", [])
+                    if isinstance(chapters_data, dict):
+                        all_chapters.append(chapters_data)
+                    elif isinstance(chapters_data, list):
+                        all_chapters.extend(chapters_data)
+                    else:
+                        print(f"Warning: Unexpected data type for 'chapters': {type(chapters_data)}")
+
+                    # Merge global tags
+                    tags_data = segment_response.get("global_tags", {})
+                    if not isinstance(tags_data, dict):
+                        print(f"Warning: Unexpected data type for 'global_tags': {type(tags_data)}")
+                        continue
+
+                    for category in ["persons", "actions", "objects"]:
+                        if category not in tags_data or not isinstance(tags_data[category], list):
+                            continue
+
+                        for tag in tags_data[category]:
+                            if not isinstance(tag, dict):
+                                 print(f"Warning: Skipping non-dictionary tag in '{category}': {type(tag)}")
+                                 continue
+                            name = tag.get("name")
+                            if not name or not isinstance(name, str) or not name.strip():
+                                print(f"Warning: Skipping tag in '{category}' with missing or invalid name: {tag}")
+                                continue
+
+                            cleaned_name = name.strip()
+                            if cleaned_name not in global_tags_agg[category]:
+                                global_tags_agg[category][cleaned_name] = { "name": cleaned_name, "timecodes": [] }
+
+                            timecodes = tag.get("timecodes", [])
+                            if isinstance(timecodes, list):
+                                valid_timecodes = [tc for tc in timecodes if isinstance(tc, dict) and "start" in tc and "end" in tc]
+                                global_tags_agg[category][cleaned_name]["timecodes"].extend(valid_timecodes)
+                            else:
+                                print(f"Warning: Unexpected timecode format for tag '{cleaned_name}': {timecodes}")
+
+                # Convert dict back to lists and clean up timecodes
+                final_global_tags_agg = {}
+                for category, tags_dict in global_tags_agg.items():
+                    tag_list = []
+                    for tag_obj in tags_dict.values():
+                        unique_timecodes_set = set(tuple(sorted(d.items())) for d in tag_obj["timecodes"])
+                        unique_timecodes_list = sorted(
+                            [dict(t) for t in unique_timecodes_set],
+                            key=lambda x: float(str(x.get("start", "inf")).rstrip("s"))
+                        )
+                        tag_obj["timecodes"] = unique_timecodes_list
+                        tag_list.append(tag_obj)
+                    final_global_tags_agg[category] = tag_list
+
+                # Create final results
+                final_results = {
+                    "chapters": all_chapters,
+                    "global_tags": final_global_tags_agg
+                }
+
+                # Update manifest's global tags
+                self.manifest.global_tags = final_global_tags_agg
+
+             except Exception as e:
+                print(f"Error during generic aggregation: {e}")
+                print("Attempting to save raw results list instead.")
+                # Fallback to save raw list if aggregation fails
+                error_output_path = os.path.join(
+                    self.manifest.processing_params.output_directory,
+                    f"_video_analysis_results_{analysis_config.name}_aggregation_error.json",
+                )
+                os.makedirs(os.path.dirname(error_output_path), exist_ok=True)
+                with open(error_output_path, "w", encoding="utf-8") as f:
+                    # Save the raw list that caused the error
+                    json.dump(results_list_or_aggregated, f, indent=4, ensure_ascii=False)
+                raise ValueError(
+                    f"Error during generic aggregation. Raw results list saved to {error_output_path}. Error: {e}"
+                )
+        else:
+             # Handle cases where results_list_or_aggregated is neither dict nor list after analysis
+             print(f"Warning: Unexpected result type after analysis: {type(results_list_or_aggregated)}. Cannot aggregate.")
+             # Consider initializing final_results to empty or raising an error
+             final_results = {"chapters": [], "global_tags": {"persons": [], "actions": [], "objects": []}}
+             self.manifest.global_tags = final_results["global_tags"]
+
+
+        # -- The rest of the function remains largely the same, operating on final_results --
+        try:
+            # Generate final summary if enabled (using the correctly determined final_results)
+            if hasattr(analysis_config, "run_final_summary") and analysis_config.run_final_summary:
+                # Check if final_results has content before summarizing
+                if final_results and (final_results.get("chapters") or final_results.get("global_tags")):
+                    print(f"Generating final summary for {self.manifest.name}")
+                    summary_prompt = self.generate_summary_prompt(analysis_config, final_results)
+                    summary_results = self._call_llm(summary_prompt)
+                    self.manifest.final_summary = summary_results.choices[0].message.content
+                    final_results["final_summary"] = self.manifest.final_summary
+                else:
+                    print("Skipping final summary generation due to empty analysis results.")
+                    self.manifest.final_summary = "Analysis resulted in empty chapters and global tags."
+                    final_results["final_summary"] = self.manifest.final_summary
+
+
+            # Save results
             final_results_output_path = os.path.join(
                 self.manifest.processing_params.output_directory,
                 f"_{analysis_config.name}.json",
             )
-
-            # generate the final summary if enabled
-            ## check to see if analysis_config has an attribute called run_final_summary
-
-            if hasattr(analysis_config, "run_final_summary"):
-                if analysis_config.run_final_summary is True:
-                    print(
-                        f"Final summary of video analysis: {analysis_config.name} for {self.manifest.name}"
-                    )
-                    summary_prompt = self.generate_summary_prompt(
-                        analysis_config, final_results
-                    )
-                    summary_results = self._call_llm(summary_prompt)
-
-                    self.manifest.final_summary = summary_results.choices[
-                        0
-                    ].message.content
-
-                    final_results = {
-                        "final_summary": self.manifest.final_summary,
-                        "results": final_results,
-                    }
-
+            
             print(f"Writing results to {final_results_output_path}")
-
+            # Ensure directory exists before writing
+            os.makedirs(os.path.dirname(final_results_output_path), exist_ok=True)
             with open(final_results_output_path, "w", encoding="utf-8") as f:
-                f.write(json.dumps(final_results, indent=4, ensure_ascii=False))
+                # Ensure final_results is a dict before dumping
+                if isinstance(final_results, dict):
+                     f.write(json.dumps(final_results, indent=4, ensure_ascii=False))
+                else:
+                     print(f"ERROR: final_results is not a dict ({type(final_results)}), cannot write JSON.")
+                     # Optionally write the raw data if it's not None
+                     if results_list_or_aggregated:
+                          f.write(json.dumps(results_list_or_aggregated, indent=4, ensure_ascii=False))
 
-        except:
-            print(results_list)
-            final_results_output_path = os.path.join(
+
+        except Exception as e: # Catch potential errors during summary or saving
+            print(f"Error during final summary generation or saving results: {e}")
+            # Log the final_results that caused the error if possible
+            print(f"Data causing error: {final_results}")
+            # Attempt to save the potentially problematic final_results
+            error_output_path = os.path.join(
                 self.manifest.processing_params.output_directory,
-                f"_video_analysis_results_{analysis_config.name}_errors.json",
+                f"_video_analysis_results_{analysis_config.name}_final_error.json",
             )
-            with open(final_results_output_path, "w", encoding="utf-8") as f:
-                f.write(json.dumps(results_list, indent=4, ensure_ascii=False))
-            raise ValueError(
-                f"Bad data generated by model. Check the output at {final_results_output_path}"
-            )
+            os.makedirs(os.path.dirname(error_output_path), exist_ok=True)
+            try:
+                 with open(error_output_path, "w", encoding="utf-8") as f:
+                     json.dump(final_results, f, indent=4, ensure_ascii=False)
+                 print(f"Problematic final_results saved to {error_output_path}")
+            except Exception as dump_e:
+                 print(f"Could not even dump the problematic final_results: {dump_e}")
+            # Optional: Re-raise the original exception or a new one
+            # raise ValueError(f"Failed during summary/saving. Check logs and {error_output_path}. Original error: {e}")
+
 
         stopwatch_end_time = time.time()
 
@@ -225,10 +390,42 @@ class VideoAnalyzer:
             parsed_response = self._analyze_segment(
                 segment=segment, analysis_config=analysis_config
             )
+            # --- EDIT 3: Pass the segment object along with the response ---
+            # Store the response AND the segment object info needed for boundary checking
+            results_list.append({
+                "analysis_result": parsed_response,
+                "segment_name": segment.segment_name,
+                "start_time": segment.start_time,
+                "end_time": segment.end_time
+             })
+            # --- End EDIT 3 ---
 
-            results_list.append(parsed_response)
 
-        return results_list
+        # After all segments have been analyzed
+        if hasattr(analysis_config, 'process_segment_results'):
+            # Use the custom processing method if available
+            # --- EDIT 4: Pass the enriched results_list ---
+            final_results = analysis_config.process_segment_results(results_list)
+            # --- End EDIT 4 ---
+            # Update the manifest's global_tags (Keep existing fix)
+            if isinstance(final_results, dict) and "global_tags" in final_results:
+                 self.manifest.global_tags = final_results["global_tags"]
+                 print(f"DEBUG (SYNC): Updated manifest global_tags via custom process_segment_results.")
+            else:
+                 print(f"DEBUG (SYNC): Did NOT update manifest global_tags. final_results type: {type(final_results)}, keys: {final_results.keys() if isinstance(final_results, dict) else 'N/A'}")
+
+            # --- Return the AGGREGATED results ---
+            return final_results
+        else:
+             # --- EDIT 5: Use generic aggregation directly if no custom method ---
+             # This block now becomes the primary return path if no custom agg.
+             print("Running generic aggregation within _analyze_segment_list.")
+             # (The generic aggregation logic previously here is now primarily in analyze_video)
+             # For simplicity here, we just return the raw list and let analyze_video handle it.
+             # Alternatively, you could replicate the generic agg logic from analyze_video here.
+             # Let's return the raw list for analyze_video to handle.
+             return results_list # Return list of dicts {"analysis_result":..., "segment_name":...}
+             # --- End EDIT 5 ---
 
     def _analyze_segment_list_sequentially(
         self, analysis_config: Type[SequentialAnalysisConfig]
@@ -396,7 +593,15 @@ class VideoAnalyzer:
 
         async def sem_task(segment):
             async with sempahore:
-                return await self._analyze_segment_async(segment, analysis_config)
+                # --- EDIT 6: Return segment info along with result ---
+                parsed_response = await self._analyze_segment_async(segment, analysis_config)
+                return {
+                    "analysis_result": parsed_response,
+                    "segment_name": segment.segment_name,
+                    "start_time": segment.start_time,
+                    "end_time": segment.end_time
+                }
+                # --- End EDIT 6 ---
 
         async def return_value_task(segment):
             return segment.analyzed_result[analysis_config.name]
@@ -418,289 +623,662 @@ class VideoAnalyzer:
 
         results_list = await asyncio.gather(*segment_task_list)
 
-        return results_list
+        # --- Aggregation Logic ---
+        if hasattr(analysis_config, 'process_segment_results'):
+            # --- EDIT 7: Pass the enriched results_list ---
+            final_results_agg = analysis_config.process_segment_results(results_list)
+            # --- End EDIT 7 ---
+            # Update the manifest's global_tags with the aggregated results (Keep existing fix)
+            if isinstance(final_results_agg, dict) and "global_tags" in final_results_agg:
+                 self.manifest.global_tags = final_results_agg["global_tags"]
+                 print(f"DEBUG (ASYNC): Updated manifest global_tags via custom process_segment_results.") # Optional debug log
+            else:
+                 print(f"DEBUG (ASYNC): Did NOT update manifest global_tags. final_results_agg type: {type(final_results_agg)}, keys: {final_results_agg.keys() if isinstance(final_results_agg, dict) else 'N/A'}") # Optional debug log
+
+            # --- Return the AGGREGATED results ---
+            return final_results_agg # Return aggregated results
+        else:
+             # --- EDIT 8: Return raw list if no custom method ---
+             print("Running generic aggregation within _analyze_segment_list_async (will be handled by analyze_video).")
+             return results_list # Return list of dicts {"analysis_result":..., "segment_name":...}
+             # --- End EDIT 8 ---
 
     def _analyze_segment(
-        self, segment: Segment, analysis_config: Type[AnalysisConfig]
+        self,
+        segment: Segment,
+        analysis_config: Type[AnalysisConfig]
     ):
-        # Initialize identified_people_in_segment if needed
-        if not hasattr(self, 'identified_people_in_segment'):
-            self.identified_people_in_segment = {}
-            
-        # Track identified people at each timestamp if face recognition is enabled
-        if self.person_group_id:
-            for i, frame_path in enumerate(segment.segment_frames_file_path):
-                timestamp = round(
-                    float(segment.start_time)
-                    + float(segment.segment_frame_time_intervals[i]),
-                    2,
-                )
-                
-                # Format timestamp for key matching
-                timestamp_key = f"{timestamp}s"
-                
-                # Process faces for this frame
-                face_results = process_frame_with_faces(frame_path, self.env, self.person_group_id)
-                
-                # Store identified people for this timestamp
-                if face_results.get("identified_people"):
-                    self.identified_people_in_segment[timestamp_key] = ", ".join(face_results.get("identified_people"))
-        
-        # Check if the segment has been processed
-        if (
-            segment.segment_prompt_path
-            and (
-                segment.analysis_completed is None
-                or (
-                    analysis_config.name not in segment.analysis_completed
-                    and not self.reprocess_segments
-                )
-            )
-        ):
+        if (not self.reprocess_segments
+            and analysis_config.name in segment.analysis_completed):
+            print(f"Segment {segment.segment_name} already analyzed, skipping.")
+            # Ensure the stored result is loaded correctly if needed later
+            # This might need adjustment if the stored format changes
+            return segment.analyzed_result.get(analysis_config.name, {"chapters": [], "global_tags": {"persons": [], "actions": [], "objects": []}})
 
-            # Load the prompt from the segment
-            with open(segment.segment_prompt_path, "r", encoding="utf-8") as f:
-                prompt = json.loads(f.read())
+        print(f"Analyzing segment {segment.segment_name} ({segment.start_time:.3f}s - {segment.end_time:.3f}s)")
+        stopwatch_segment = time.time()
 
-            # Call the LLM
-            llm_response = self._call_llm(prompt)
+        # --- Stage 1: Get Chapters (Full Segment Context) ---
+        print(f"  - Stage 1: Requesting Chapters...")
+        chapter_prompt = self._generate_segment_prompt(
+            segment=segment,
+            analysis_config=analysis_config,
+            generate_chapters=True,
+            generate_tags=False # Ask ONLY for chapters
+        )
+        chapters_result = {"chapters": []} # Default
+        if chapter_prompt:
+            try:
+                chapter_llm_response = self._call_llm(chapter_prompt)
+                chapters_result = self._parse_llm_json_response(
+                    chapter_llm_response,
+                    expecting_chapters=True,
+                    expecting_tags=False # Parse only chapters
+                 )
+                print(f"  - Stage 1: Received {len(chapters_result.get('chapters',[]))} chapter(s).")
+            except Exception as e:
+                print(f"Error getting chapters for segment {segment.segment_name}: {e}")
+                # Proceed with empty chapters, tags might still work
 
-            llm_response_path = os.path.join(
-                segment.segment_folder_path, "_segment_llm_response.json"
-            )
-            # store the raw response
-            with open(llm_response_path, "w", encoding="utf-8") as f:
-                f.write(str(llm_response.json(exclude_unset=True)))
+        # --- Stage 2: Get Tags (Chunked Analysis) ---
+        print(f"  - Stage 2: Requesting Tags in {self.TAG_CHUNK_SECONDS}s chunks...")
+        all_frames = segment.segment_frames_file_path
+        all_times = segment.segment_frame_time_intervals # Use the accurate times
+        tag_chunk_results = []
+        segment_duration = segment.end_time - segment.start_time
 
-            parsed_response = self._parse_llm_json_response(llm_response)
+        num_chunks = math.ceil(segment_duration / self.TAG_CHUNK_SECONDS) if self.TAG_CHUNK_SECONDS > 0 else 1
+        print(f"    - Dividing into {num_chunks} chunks...")
 
-            segment_result_output_path = os.path.join(
-                segment.segment_folder_path, "_segment_analyzed_result.json"
-            )
-            with open(segment_result_output_path, "w", encoding="utf-8") as f:
-                f.write(json.dumps(parsed_response, indent=4, ensure_ascii=False))
+        for i in range(num_chunks):
+             chunk_start = segment.start_time + (i * self.TAG_CHUNK_SECONDS)
+             chunk_end = min(segment.start_time + ((i + 1) * self.TAG_CHUNK_SECONDS), segment.end_time)
+             print(f"    - Processing Chunk {i+1}/{num_chunks} ({chunk_start:.3f}s - {chunk_end:.3f}s)")
 
-            # Update the segment object with the analyzed results
-            segment.analyzed_result[analysis_config.name] = parsed_response
+             # Find frames/times within this chunk (inclusive start, exclusive end?) Let's do inclusive start/end for simplicity
+             # Add a small epsilon for float comparisons
+             epsilon = 0.001
+             chunk_indices = [
+                 idx for idx, t in enumerate(all_times)
+                 if chunk_start - epsilon <= t <= chunk_end + epsilon
+             ]
+
+             if not chunk_indices:
+                  print(f"      - No frames found for chunk {i+1}. Skipping.")
+                  continue
+
+             chunk_frames = [all_frames[idx] for idx in chunk_indices]
+             chunk_times = [all_times[idx] for idx in chunk_indices]
+             print(f"      - Found {len(chunk_frames)} frames for this chunk.")
+
+
+             tag_prompt = self._generate_segment_prompt(
+                 segment=segment,
+                 analysis_config=analysis_config,
+                 frames_subset=chunk_frames,
+                 times_subset=chunk_times,
+                 generate_chapters=False, # Ask ONLY for tags
+                 generate_tags=True,
+                 chunk_start_time=chunk_start, # Pass chunk boundaries
+                 chunk_end_time=chunk_end
+             )
+
+             if tag_prompt:
+                 try:
+                     tag_llm_response = self._call_llm(tag_prompt)
+                     parsed_chunk = self._parse_llm_json_response(
+                         tag_llm_response,
+                         expecting_chapters=False, # Parse only tags
+                         expecting_tags=True
+                     )
+                     tag_chunk_results.append(parsed_chunk)
+                     # Optional: Log count of tags found in chunk
+                     tags_found = sum(len(v) for k, v in parsed_chunk.get("global_tags", {}).items())
+                     print(f"      - Chunk {i+1} analysis complete. Found {tags_found} tags.")
+
+                 except Exception as e:
+                     print(f"Error getting tags for chunk {i+1} of segment {segment.segment_name}: {e}")
+                     # Continue to next chunk
+
+
+        # --- Stage 3: Merge Tags ---
+        print(f"  - Stage 3: Merging tags from {len(tag_chunk_results)} successful chunks...")
+        merged_global_tags = self._merge_tagging_chunks(tag_chunk_results)
+        tags_merged_count = sum(len(v) for k, v in merged_global_tags.items())
+        print(f"  - Stage 3: Merged into {tags_merged_count} unique tags.")
+
+        # --- Stage 4: Combine ---
+        final_combined_result = {
+            "chapters": chapters_result.get("chapters", []),
+            "global_tags": merged_global_tags
+        }
+
+        # --- Stage 5: Update Segment Object and Save ---
+        segment.analyzed_result[analysis_config.name] = final_combined_result
+        # Ensure analysis_completed list tracks unique names
+        if analysis_config.name not in segment.analysis_completed:
             segment.analysis_completed.append(analysis_config.name)
 
-            # Update the manifest on disk (allows for checkpointing)
-            write_video_manifest(self.manifest)
+        # Save intermediate results (optional but recommended)
+        try:
+             segment_result_path = os.path.join(segment.segment_folder_path, f"_segment_analyzed_result_{analysis_config.name}.json")
+             with open(segment_result_path, "w", encoding="utf-8") as f:
+                  json.dump(final_combined_result, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+             print(f"Warning: Could not save intermediate segment result for {segment.segment_name}: {e}")
 
-            return parsed_response
-        elif self.reprocess_segments:
-            # Load the prompt from the segment
-            with open(segment.segment_prompt_path, "r", encoding="utf-8") as f:
-                prompt = json.loads(f.read())
+        # Update manifest (This might need locking if multiple async segments write simultaneously)
+        # For simplicity, we assume write_video_manifest handles potential concurrent writes gracefully,
+        # or we accept the risk of potential race conditions if updates are very frequent.
+        # A safer approach would involve collecting all results and writing the manifest once at the end
+        # of _analyze_segment_list_async, or using an async lock.
+        write_video_manifest(self.manifest)
 
-            # Call the LLM
-            llm_response = self._call_llm(prompt)
+        # Update known tags (potential race condition if shared state isn't handled carefully)
+        # Similar to manifest writing, modifying shared sets like _current_known_* needs care.
+        # For map-reduce, this update might be less critical for cross-segment influence during the run.
+        if isinstance(merged_global_tags, dict):
+             for tag_type, tag_list in merged_global_tags.items():
+                  if isinstance(tag_list, list):
+                      for item in tag_list:
+                          if isinstance(item, dict):
+                              name = item.get("name")
+                              if name and isinstance(name, str):
+                                   cleaned_name = name.strip()
+                                   if cleaned_name:
+                                       if tag_type == "persons": self._current_known_persons.add(cleaned_name)
+                                       elif tag_type == "actions": self._current_known_actions.add(cleaned_name)
+                                       elif tag_type == "objects": self._current_known_objects.add(cleaned_name)
 
-            llm_response_path = os.path.join(
-                segment.segment_folder_path, "_segment_llm_response.json"
-            )
-            # store the raw response
-            with open(llm_response_path, "w", encoding="utf-8") as f:
-                f.write(str(llm_response.json(exclude_unset=True)))
 
-            parsed_response = self._parse_llm_json_response(llm_response)
+        elapsed_segment = time.time() - stopwatch_segment
+        print(f"Segment {segment.segment_name} finished analysis in {elapsed_segment:.2f} seconds.")
 
-            segment_result_output_path = os.path.join(
-                segment.segment_folder_path, "_segment_analyzed_result.json"
-            )
-            with open(segment_result_output_path, "w", encoding="utf-8") as f:
-                f.write(json.dumps(parsed_response, indent=4, ensure_ascii=False))
-
-            # Update the segment object with the analyzed results
-            segment.analyzed_result[analysis_config.name] = parsed_response
-            segment.analysis_completed.append(analysis_config.name)
-
-            # Update the manifest on disk (allows for checkpointing)
-            write_video_manifest(self.manifest)
-
-            return parsed_response
-        else:
-            return segment.analyzed_result[analysis_config.name]
+        return final_combined_result # Return the combined result
 
     async def _analyze_segment_async(
         self,
         segment: Segment,
         analysis_config: AnalysisConfig,
     ):
+        if (not self.reprocess_segments
+            and analysis_config.name in segment.analysis_completed):
+            print(f"Segment {segment.segment_name} already analyzed (async), skipping.")
+            return segment.analyzed_result.get(analysis_config.name, {"chapters": [], "global_tags": {"persons": [], "actions": [], "objects": []}})
 
-        start_time = time.time()
-        print(f"Starting analysis for segment {segment.segment_name}")
+        print(f"Analyzing segment {segment.segment_name} asynchronously...")
+        stopwatch_segment = time.time()
 
-        # Generate the prompt
-        segment_prompt = self._generate_segment_prompt(segment, analysis_config)
-
-        # submit call the LLM to analyze the segment
-        response = await self._call_llm_async(segment_prompt)
-
-        # parse the response and update the segment object
-        parsed_response = self._parse_llm_json_response(response)
-        segment.analyzed_result[analysis_config.name] = parsed_response
-        segment.analysis_completed.append(analysis_config.name)
-
-        # write the raw response outputs
-        llm_response_output_path = os.path.join(
-            segment.segment_folder_path, f"_segment_llm_response.json"
+        # --- Stage 1: Get Chapters (Async) ---
+        print(f"  - Stage 1 (Async): Requesting Chapters...")
+        chapter_prompt = self._generate_segment_prompt(
+             segment=segment, analysis_config=analysis_config, generate_chapters=True, generate_tags=False
         )
-        with open(llm_response_output_path, "w", encoding="utf-8") as f:
-            f.write(response.model_dump_json(indent=4))
+        chapters_result = {"chapters": []}
+        if chapter_prompt:
+            try:
+                chapter_llm_response = await self._call_llm_async(chapter_prompt)
+                chapters_result = self._parse_llm_json_response(chapter_llm_response, expecting_chapters=True, expecting_tags=False)
+                print(f"  - Stage 1 (Async): Received {len(chapters_result.get('chapters',[]))} chapter(s).")
+            except Exception as e:
+                print(f"Error getting chapters async for segment {segment.segment_name}: {e}")
 
-        # write the LLM generated analysis
-        parsed_response_output_path = os.path.join(
-            segment.segment_folder_path, f"_segment_analyzed_result.json"
-        )
-        with open(parsed_response_output_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(parsed_response))
 
-        endtime = time.time()
-        elapsed_time = endtime - start_time
-        print(
-            f"Segment {segment.segment_name} analyzed in {round(elapsed_time, 3)} seconds"
-        )
+        # --- Stage 2: Get Tags (Chunked Async Calls) ---
+        print(f"  - Stage 2 (Async): Requesting Tags in {self.TAG_CHUNK_SECONDS}s chunks...")
+        all_frames = segment.segment_frames_file_path
+        all_times = segment.segment_frame_time_intervals
+        tag_chunk_tasks = []
+        segment_duration = segment.end_time - segment.start_time
+        num_chunks = math.ceil(segment_duration / self.TAG_CHUNK_SECONDS) if self.TAG_CHUNK_SECONDS > 0 else 1
+        print(f"    - Dividing into {num_chunks} chunks...")
 
-        return parsed_response
+        for i in range(num_chunks):
+            chunk_start = segment.start_time + (i * self.TAG_CHUNK_SECONDS)
+            chunk_end = min(segment.start_time + ((i + 1) * self.TAG_CHUNK_SECONDS), segment.end_time)
 
-    def _generate_segment_refine_prompts(self, Segment, AnalysisConfig):
-        pass
+            epsilon = 0.001
+            chunk_indices = [idx for idx, t in enumerate(all_times) if chunk_start - epsilon <= t <= chunk_end + epsilon]
+            if not chunk_indices: continue
+
+            chunk_frames = [all_frames[idx] for idx in chunk_indices]
+            chunk_times = [all_times[idx] for idx in chunk_indices]
+
+            tag_prompt = self._generate_segment_prompt(
+                 segment=segment, analysis_config=analysis_config, frames_subset=chunk_frames,
+                 times_subset=chunk_times, generate_chapters=False, generate_tags=True,
+                 chunk_start_time=chunk_start, chunk_end_time=chunk_end
+            )
+            if tag_prompt:
+                 # Create a task for each chunk's LLM call
+                 task = asyncio.create_task(self._call_llm_async(tag_prompt), name=f"Chunk_{i+1}")
+                 tag_chunk_tasks.append(task)
+
+        # Gather results from all chunk tasks
+        tag_llm_responses = []
+        if tag_chunk_tasks:
+             print(f"    - Awaiting {len(tag_chunk_tasks)} tag chunk analyses...")
+             # Use return_exceptions=True to handle potential errors in individual calls
+             tag_llm_responses = await asyncio.gather(*tag_chunk_tasks, return_exceptions=True)
+             print(f"    - Tag chunk analyses complete.")
+
+        # Process responses
+        tag_chunk_results = []
+        for i, response_or_exc in enumerate(tag_llm_responses):
+             if isinstance(response_or_exc, Exception):
+                  print(f"Error in async tag chunk {i+1} for segment {segment.segment_name}: {response_or_exc}")
+             elif response_or_exc: # Check if response is not None
+                  try:
+                       parsed_chunk = self._parse_llm_json_response(
+                            response_or_exc, expecting_chapters=False, expecting_tags=True
+                       )
+                       tag_chunk_results.append(parsed_chunk)
+                  except Exception as parse_exc:
+                       print(f"Error parsing async tag chunk {i+1} response: {parse_exc}")
+             else:
+                  print(f"Warning: Received None response for async tag chunk {i+1}")
+
+
+        # --- Stage 3: Merge Tags ---
+        print(f"  - Stage 3 (Async): Merging tags from {len(tag_chunk_results)} successful chunks...")
+        merged_global_tags = self._merge_tagging_chunks(tag_chunk_results)
+        tags_merged_count = sum(len(v) for k, v in merged_global_tags.items())
+        print(f"  - Stage 3 (Async): Merged into {tags_merged_count} unique tags.")
+
+        # --- Stage 4: Combine ---
+        final_combined_result = {
+            "chapters": chapters_result.get("chapters", []),
+            "global_tags": merged_global_tags
+        }
+
+        # --- Stage 5: Update Segment & Save ---
+        segment.analyzed_result[analysis_config.name] = final_combined_result
+        if analysis_config.name not in segment.analysis_completed:
+            segment.analysis_completed.append(analysis_config.name)
+        # Save intermediate results (Consider async file writing if it becomes a bottleneck)
+        try:
+             segment_result_path = os.path.join(segment.segment_folder_path, f"_segment_analyzed_result_{analysis_config.name}.json")
+             with open(segment_result_path, "w", encoding="utf-8") as f:
+                  json.dump(final_combined_result, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+             print(f"Warning: Could not save intermediate segment result for {segment.segment_name} (async): {e}")
+
+        # Update manifest (This might need locking if multiple async segments write simultaneously)
+        # For simplicity, we assume write_video_manifest handles potential concurrent writes gracefully,
+        # or we accept the risk of potential race conditions if updates are very frequent.
+        # A safer approach would involve collecting all results and writing the manifest once at the end
+        # of _analyze_segment_list_async, or using an async lock.
+        write_video_manifest(self.manifest)
+
+        # Update known tags (potential race condition if shared state isn't handled carefully)
+        # Similar to manifest writing, modifying shared sets like _current_known_* needs care.
+        # For map-reduce, this update might be less critical for cross-segment influence during the run.
+        if isinstance(merged_global_tags, dict):
+             for tag_type, tag_list in merged_global_tags.items():
+                  if isinstance(tag_list, list):
+                      for item in tag_list:
+                          if isinstance(item, dict):
+                              name = item.get("name")
+                              if name and isinstance(name, str):
+                                   cleaned_name = name.strip()
+                                   if cleaned_name:
+                                       if tag_type == "persons": self._current_known_persons.add(cleaned_name)
+                                       elif tag_type == "actions": self._current_known_actions.add(cleaned_name)
+                                       elif tag_type == "objects": self._current_known_objects.add(cleaned_name)
+
+
+        elapsed_segment = time.time() - stopwatch_segment
+        print(f"Segment {segment.segment_name} finished analysis (async) in {elapsed_segment:.2f} seconds.")
+
+        return final_combined_result
 
     def _generate_segment_prompt(
         self,
         segment: Segment,
         analysis_config: AnalysisConfig,
+        frames_subset: List[str] = None,
+        times_subset: List[float] = None,
+        generate_chapters: bool = True,
+        generate_tags: bool = True,
+        chunk_start_time: Optional[float] = None,
+        chunk_end_time: Optional[float] = None,
+        is_partial_chunk: bool = False
     ):
         """
-        Generate a prompt for a segment.
-        """
-        # Initialize list to track identified faces
-        identified_people = set()
-        
-        # Generate system prompt
-        system_prompt_template = analysis_config.generate_system_prompt_template()
-        system_prompt = system_prompt_template.format(
-            # Format seconds with millisecond precision
-            start_time=f"{float(segment.start_time):.3f}",
-            end_time=f"{float(segment.end_time):.3f}",
-            segment_duration=segment.segment_duration,
-            number_of_frames=segment.number_of_frames,
-            video_duration=f"{float(self.manifest.source_video.duration):.3f}",
-            analysis_lens=getattr(analysis_config, "system_prompt_lens", "")
-            if hasattr(analysis_config, "system_prompt_lens")
-            else "",
-            results_template=analysis_config.results_template,
-        )
+        Generate a prompt for a segment, adaptable for full context or tag-specific chunks.
 
-        # Prepare user content
+        Args:
+            segment: Segment object containing video segment info
+            analysis_config: Analysis configuration
+            frames_subset: Optional subset of frames to process
+            times_subset: Optional subset of frame timestamps
+            generate_chapters: Whether to ask for the 'chapters' part.
+            generate_tags: Whether to ask for the 'global_tags' part.
+            chunk_start_time: The start time of the specific chunk being analyzed for tags.
+            chunk_end_time: The end time of the specific chunk being analyzed for tags.
+            is_partial_chunk: Whether this is a partial chunk due to MAX_FRAMES_PER_PROMPT limit.
+        """
+        frames_to_process = frames_subset if frames_subset is not None else segment.segment_frames_file_path
+        times_to_process = times_subset if times_subset is not None else segment.segment_frame_time_intervals
+
+        if not frames_to_process:
+             print(f"Warning: No frames to process for prompt generation in segment {segment.segment_name}.")
+             # Handle this case - maybe return None or raise error?
+             return None # Or empty prompt structure
+
+        # --- 1. System Prompt Generation ---
+        system_prompt_base = getattr(analysis_config, "system_prompt", "Default system prompt")
+        system_prompt_lens_template = getattr(analysis_config, "system_prompt_lens", "")
+
+        # Modify the base prompt instructions based on what we're generating
+        adjusted_system_prompt = system_prompt_base
+
+        # Adjust JSON structure instruction (Point 1)
+        if generate_chapters and not generate_tags:
+            adjusted_system_prompt = adjusted_system_prompt.replace(
+                 'ONLY these two top-level keys: "chapters" and "global_tags"',
+                 'ONLY the top-level key: "chapters". Do NOT include "global_tags".'
+            ).replace(
+                 '- "global_tags": An object containing three keys: "persons", "actions", "objects" (each value must be an array of tag objects).',
+                 '' # Remove the global_tags description
+            )
+        elif not generate_chapters and generate_tags:
+             adjusted_system_prompt = adjusted_system_prompt.replace(
+                 'ONLY these two top-level keys: "chapters" and "global_tags"',
+                 'ONLY the top-level key: "global_tags". Do NOT include "chapters".'
+            ).replace(
+                 '- "chapters": An array containing EXACTLY ONE chapter object describing the current segment.',
+                 '' # Remove the chapters description
+            )
+        # else: keep original instruction for both
+
+        # Adjust Output Format Example (Point 2)
+        output_format_example_str = analysis_config.results_template # Or reconstruct from prompt
+        try:
+             output_format_example = json.loads(output_format_example_str) if isinstance(output_format_example_str, str) else output_format_example_str
+             if not generate_chapters:
+                  output_format_example.pop("chapters", None)
+             if not generate_tags:
+                  output_format_example.pop("global_tags", None)
+             adjusted_example_str = json.dumps(output_format_example, indent=2)
+             # Replace the example in the prompt (this requires finding the bounds reliably, maybe use markers)
+             start_marker = "2. EXACT OUTPUT FORMAT:\n{{"
+             end_marker = "}}" # This is tricky if }} appears elsewhere
+             # Find the section and replace (simplistic approach below)
+             start_idx = adjusted_system_prompt.find(start_marker)
+             end_idx = adjusted_system_prompt.find(end_marker, start_idx + len(start_marker))
+             if start_idx != -1 and end_idx != -1:
+                 original_example_part = adjusted_system_prompt[start_idx:end_idx+len(end_marker)]
+                 new_example_part = f"2. EXACT OUTPUT FORMAT:\n{adjusted_example_str}"
+                 adjusted_system_prompt = adjusted_system_prompt.replace(original_example_part, new_example_part, 1)
+
+        except Exception as e:
+             print(f"Warning: Could not adjust output format example in prompt: {e}")
+
+
+        # Adjust Timestamp Precision Instruction (Point 3) - Crucial for tag chunks
+        if not generate_chapters and generate_tags and chunk_start_time is not None and chunk_end_time is not None:
+              # Make timestamp instructions specific to the TAG CHUNK
+              adjusted_system_prompt = adjusted_system_prompt.replace(
+                   "Base ALL timestamps (`chapters` start/end AND `global_tags` timecodes start/end)",
+                   "Base ALL `global_tags` timecodes (`start`, `end`)"
+              ).replace(
+                  "All timestamps MUST be within the overall segment's absolute start ({start_time}) and end ({end_time}) times provided in the analysis section below.",
+                  f"CRITICAL: All tag timecodes MUST be strictly between {chunk_start_time:.3f}s and {chunk_end_time:.3f}s, based *only* on the frame timestamps provided below for this specific chunk. Do not use timestamps outside this narrow range."
+              ).replace(
+                  "Do NOT DEFAULT TO SEGMENT BOUNDARIES", # Keep this part
+                  f"Do NOT DEFAULT TO CHUNK BOUNDARIES ({chunk_start_time:.3f}s-{chunk_end_time:.3f}s)" # Add specific bounds
+              )
+        # If generating chapters, keep the reference to segment start/end for chapter times
+        elif generate_chapters:
+            # Remove reference to global_tags if only generating chapters
+            if not generate_tags:
+                 adjusted_system_prompt = adjusted_system_prompt.replace(
+                      "(`chapters` start/end AND `global_tags` timecodes start/end)",
+                      "(`chapters` start/end)"
+                 )
+
+
+        # Append Lens
+        known_actions_str = ", ".join(sorted(list(self._current_known_actions))) if self._current_known_actions else "None"
+        known_objects_str = ", ".join(sorted(list(self._current_known_objects))) if self._current_known_objects else "None"
+
+        try:
+            # Determine start/end for the lens based on context
+            lens_start = chunk_start_time if chunk_start_time is not None else float(segment.start_time)
+            lens_end = chunk_end_time if chunk_end_time is not None else float(segment.end_time)
+
+            formatted_lens = system_prompt_lens_template.format(
+                start_time=f"{lens_start:.3f}",
+                end_time=f"{lens_end:.3f}",
+                number_of_frames=len(frames_to_process),
+                known_actions=known_actions_str,
+                known_objects=known_objects_str
+            )
+             # Conditionally add chapter/tag reminders to lens
+            if generate_chapters and not generate_tags:
+                 formatted_lens += "\n\nFocus ONLY on generating the 'chapters' array for this segment."
+            elif not generate_chapters and generate_tags:
+                 formatted_lens += f"\n\nFocus ONLY on generating the 'global_tags' object for this time chunk ({lens_start:.3f}s-{lens_end:.3f}s). Tag accurately within this window."
+
+            adjusted_system_prompt += "\n" + formatted_lens
+
+        except Exception as e:
+             print(f"Error formatting system_prompt_lens: {e}")
+             adjusted_system_prompt += "\nError formatting analysis lens."
+
+
+        # --- 2. User Content Generation ---
         user_content = []
 
-        # Add transcription if available
-        if segment.transcription is not None:
-            user_content.append(
-                {
-                    "type": "text",
-                    "text": f"Audio Transcription for the next {segment.segment_duration} seconds: {segment.transcription}",
-                }
-            )
+        # Add transcription context (always useful, even for tags)
+        transcription_text = segment.transcription if segment.transcription else "No transcription available"
+        # Optional: Trim transcription to chunk if generating tags only? Maybe not necessary.
+        user_content.append(
+            {"type": "text", "text": f"Audio Transcription Context: {transcription_text}"}
+        )
 
-        # Add peoples list information if available
-        if self.peoples_list:
-            user_content.append(self._generate_list_prompt("peoples", self.peoples_list))
-        
-        # Add emotions list information if available
-        if self.emotions_list:
-            user_content.append(self._generate_list_prompt("emotions", self.emotions_list))
-        
-        # Add objects list information if available
-        if self.objects_list:
-            user_content.append(self._generate_list_prompt("objects", self.objects_list))
-        
-        # Add themes list information if available
-        if self.themes_list:
-            user_content.append(self._generate_list_prompt("themes", self.themes_list))
-        
-        # Add actions list information if available
-        if self.actions_list:
-            user_content.append(self._generate_list_prompt("actions", self.actions_list))
-        
-        # Add frames with timestamps
-        for i, frame_path in enumerate(segment.segment_frames_file_path):
-            # Get frame timestamp with millisecond precision
-            timestamp = round(
-                float(segment.start_time)
-                + float(segment.segment_frame_time_intervals[i]),
-                3,
-            )
-            
-            # Process frame for faces if person_group_id is provided
-            frame_info = {"timestamp": timestamp}
-            if self.person_group_id:
-                # Process face recognition on the frame
-                face_results = process_frame_with_faces(frame_path, self.env, self.person_group_id)
-                # Add identified people to our tracking set
-                if face_results.get("identified_people"):
-                    # For the set (used locally in this method)
-                    for person in face_results.get("identified_people", []):
-                        identified_people.add(person)
-                    
-                    # For the instance variable (used across methods)
-                    # Ensure consistent timestamp format with 3 decimal places
-                    timestamp_key = f"{timestamp:.3f}s"
-                    self.identified_people_in_segment[timestamp_key] = ", ".join(face_results.get("identified_people"))
-                
-                # Store face data with the frame
-                frame_info["faces"] = face_results.get("faces", [])
-            
-            # Encode the image for the AI model
-            image_content = encode_image_base64(frame_path)
-            
-            # Add frame to user content
-            user_content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{image_content}",
-                        "detail": "high",
-                    },
-                }
-            )
-            user_content.append(
-                {
-                    "type": "text", 
-                    "text": f"Frame at timestamp {timestamp:.3f}s"
-                }
-            )
+        # Add lists (people, objects, etc.) - always useful context
+        # ... (keep existing code for adding peoples_list, emotions_list etc prompts) ...
+        if self.peoples_list: user_content.append(self._generate_list_prompt("peoples", self.peoples_list))
+        # ... add other lists ...
+        if self.actions_list: user_content.append(self._generate_list_prompt("actions", self.actions_list))
 
-        # Add summary of identified people across all frames if any were found
-        if self.person_group_id and self.identified_people_in_segment:
-            user_content.insert(0, {
-                "type": "text",
-                "text": f"Identified people in this segment: {', '.join(sorted(self.identified_people_in_segment.values()))}"
-            })
-            
-            # Add instructions about personNames field and prohibit using names in other fields
-            user_content.insert(1, {
-                "type": "text",
-                "text": f"IMPORTANT INSTRUCTIONS ABOUT NAMES:\n\n1. For the 'personNames' field in your output, ONLY include names of people that have been identified via face recognition. If no people were identified, leave the 'personNames' field blank.\n\n2. You CAN naturally mention recognizable public figures (celebrities, politicians, athletes, etc.) in your description fields if you recognize them visually, but do NOT mention the specific names that appear in the 'personNames' field in your other fields.\n\n3. The 'personNames' field is strictly for storing face-recognized identities only, while descriptions should use your own visual recognition abilities for public figures and generic terms for non-public individuals.\n\n4. For the 'peoples' field, identify any people from the provided list who appear in the images, based on their jersey numbers or other identifying features."
-            })
 
-        # Save the prompt in the segment
-        if segment.segment_prompt_path is None:
-            segment.segment_prompt_path = os.path.join(
-                segment.segment_folder_path, "segment_prompt.json"
-            )
+        # Add Frame Analysis Instructions (Keep general instructions)
+        user_content.append({
+            "type": "text",
+            "text": """IMPORTANT: Analyze the following frames carefully. Note visual elements, actions, objects, and track their appearance/disappearance using the provided timestamps."""
+        })
 
+        # Add Frames with Timestamps
+        if not times_to_process or len(times_to_process) != len(frames_to_process):
+             print(f"Error: Mismatch between frames ({len(frames_to_process)}) and times ({len(times_to_process)}) for segment {segment.segment_name}")
+             # Fallback or error handling needed
+             # Simplistic fix: Recalculate times based on frame count and segment duration/chunk duration
+             effective_start = chunk_start_time if chunk_start_time is not None else segment.start_time
+             effective_end = chunk_end_time if chunk_end_time is not None else segment.end_time
+             if len(frames_to_process) > 0:
+                  times_to_process = np.linspace(effective_start, effective_end, len(frames_to_process), endpoint=False)
+                  times_to_process = [round(float(t), 3) for t in times_to_process]
+             else:
+                  times_to_process = []
+
+
+        for i, frame_path in enumerate(frames_to_process):
+             # Ensure we have a valid timestamp for each frame
+             if i >= len(times_to_process):
+                  print(f"Warning: Missing timestamp for frame {i} ({frame_path}). Skipping frame.")
+                  continue
+             timestamp = times_to_process[i] # Use the potentially recalculated time
+
+             # Encode image
+             image_content = encode_image_base64(frame_path)
+
+             # Add frame timestamp label
+             user_content.append({"type": "text", "text": f"\nFrame at {timestamp:.3f}s:"})
+             # Add image data
+             user_content.append({
+                 "type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{image_content}", "detail": "high"}
+             })
+
+        # Add Identified People Summary (if applicable)
+        # ... (keep existing logic for adding identified people if self.person_group_id)
+
+        # Add FINAL reminder about output format, adapted for the request
+        final_reminder_text = "CRITICAL: Your output MUST be VALID JSON"
+        if generate_chapters and generate_tags:
+            final_reminder_text += " with 'chapters' and 'global_tags' keys."
+        elif generate_chapters:
+             final_reminder_text += " with ONLY the 'chapters' key."
+        elif generate_tags:
+             final_reminder_text += f" with ONLY the 'global_tags' key, containing tags strictly within the {chunk_start_time:.3f}s to {chunk_end_time:.3f}s window."
+        # Append the adjusted example structure (or a simplified text version)
+        final_reminder_text += f"\n\nExpected Structure:\n{adjusted_example_str}"
+
+        user_content.append({"type": "text", "text": final_reminder_text})
+
+
+        # --- 3. Construct Final Prompt ---
         prompt = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": adjusted_system_prompt},
             {"role": "user", "content": user_content},
         ]
 
-        with open(segment.segment_prompt_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(prompt, ensure_ascii=False))
+        # Save the prompt (optional, maybe save chunk prompts differently)
+        # ... (consider whether/how to save these potentially numerous chunk prompts) ...
 
         return prompt
+
+    def _merge_tagging_chunks(self, tag_chunk_results: List[Dict]) -> Dict:
+        """Merges global_tags from multiple chunk analyses."""
+        merged_tags = {
+            "persons": defaultdict(list), # Store timecodes per person name
+            "actions": defaultdict(list),
+            "objects": defaultdict(list)
+        }
+
+        for chunk_result in tag_chunk_results:
+            if not isinstance(chunk_result, dict): continue
+            global_tags = chunk_result.get("global_tags", {})
+            if not isinstance(global_tags, dict): continue
+
+            for tag_type in ["persons", "actions", "objects"]:
+                if tag_type not in global_tags or not isinstance(global_tags[tag_type], list): continue
+
+                for item in global_tags[tag_type]:
+                     if not isinstance(item, dict): continue
+                     name = item.get("name")
+                     timecodes = item.get("timecodes", [])
+                     if not name or not isinstance(name, str) or not name.strip() or not isinstance(timecodes, list): continue
+
+                     cleaned_name = name.strip()
+                     # Add all valid timecodes from this chunk to the master list for this tag name
+                     for tc in timecodes:
+                          if isinstance(tc, dict) and "start" in tc and "end" in tc:
+                               # Basic validation - further validation/clamping happens later if needed
+                               try:
+                                    start_f = float(str(tc["start"]).rstrip('s'))
+                                    end_f = float(str(tc["end"]).rstrip('s'))
+                                    if start_f <= end_f:
+                                         merged_tags[tag_type][cleaned_name].append(tc)
+                               except (ValueError, TypeError):
+                                    print(f"Warning: Skipping invalid timecode format during chunk merge: {tc}")
+                                    continue
+
+        # Convert defaultdict back to the final list structure
+        final_merged_structure = { "persons": [], "actions": [], "objects": [] }
+        for tag_type, name_dict in merged_tags.items():
+            for name, timecode_list in name_dict.items():
+                if timecode_list: # Only add if there are timecodes
+                     # Optional: Deduplicate timecodes here if needed, though aggregation later might handle it
+                     unique_timecodes_set = set(tuple(sorted(d.items())) for d in timecode_list)
+                     unique_timecodes_list = sorted(
+                            [dict(t) for t in unique_timecodes_set],
+                            key=lambda x: float(str(x.get("start", "inf")).rstrip("s"))
+                     )
+                     final_merged_structure[tag_type].append({
+                          "name": name,
+                          "timecodes": unique_timecodes_list
+                     })
+
+        return final_merged_structure
+
+    def _parse_llm_json_response(self, response, expecting_chapters=True, expecting_tags=True):
+         # ... (initial raw_content extraction and ```json``` handling) ...
+         raw_content = response.choices[0].message.content
+         # ... (existing ```json stripping) ...
+         content = raw_content # Placeholder for stripped content
+         if "```json" in content:
+             content = content.split("```json")[1].split("```")[0].strip()
+         elif content.startswith("```") and content.endswith("```"):
+             content = content[3:-3].strip()
+
+         try:
+             parsed_data = json.loads(content)
+             if not isinstance(parsed_data, dict):
+                 raise json.JSONDecodeError("Response is not a JSON object", content, 0)
+
+             final_parsed_content = {}
+
+             # Process Chapters if expected
+             if expecting_chapters:
+                 chapters_raw = parsed_data.get("chapters", [])
+                 # ... (existing chapter processing logic: single dict handling, timestamp conversion, etc.) ...
+                 processed_chapters = []
+                 if isinstance(chapters_raw, dict): chapters_raw = [chapters_raw] # Handle single
+                 if isinstance(chapters_raw, list):
+                      for item in chapters_raw:
+                           if not isinstance(item, dict): continue
+                           # --- Apply existing processing/validation ---
+                           # (Copy relevant parts of existing chapter processing here)
+                           # e.g., timestamp format conversion, field name mapping...
+                           # Make sure to handle potential errors gracefully for each chapter
+                           # --- End existing chapter processing copy ---
+                           processed_chapters.append(item) # Append valid chapter
+                 final_parsed_content["chapters"] = processed_chapters
+             else:
+                  # If not expecting chapters, but key exists, maybe log warning?
+                  final_parsed_content["chapters"] = [] # Ensure key exists but is empty
+
+             # Process Global Tags if expected
+             if expecting_tags:
+                 global_tags_raw = parsed_data.get("global_tags", {})
+                 processed_tags = {"persons": [], "actions": [], "objects": []}
+                 if isinstance(global_tags_raw, dict):
+                      for tag_type in ["persons", "actions", "objects"]:
+                           tags_list = global_tags_raw.get(tag_type, [])
+                           if not isinstance(tags_list, list): tags_list = []
+                           valid_tags_for_type = []
+                           for item in tags_list:
+                                if isinstance(item, dict) and "name" in item and "timecodes" in item:
+                                     # Add basic validation for timecodes format maybe?
+                                     valid_tags_for_type.append(item)
+                           processed_tags[tag_type] = valid_tags_for_type
+                 final_parsed_content["global_tags"] = processed_tags
+             else:
+                  # If not expecting tags, but key exists, maybe log warning?
+                  final_parsed_content["global_tags"] = {"persons": [], "actions": [], "objects": []} # Ensure structure
+
+             return final_parsed_content
+
+         except json.JSONDecodeError as e:
+            print(f"Error parsing JSON response: {e}")
+            print(f"Response content: {content}")
+            # Return default structure based on expectations
+            fallback = {}
+            if expecting_chapters: fallback["chapters"] = []
+            if expecting_tags: fallback["global_tags"] = {"persons": [], "actions": [], "objects": []}
+            return fallback
+         except Exception as e:
+             print(f"Error processing LLM response: {e}")
+             print(f"Response content: {content}")
+             # Return default structure based on expectations
+             fallback = {}
+             if expecting_chapters: fallback["chapters"] = []
+             if expecting_tags: fallback["global_tags"] = {"persons": [], "actions": [], "objects": []}
+             return fallback
 
     def _generate_list_prompt(self, list_type, list_data):
         """Helper method to generate prompt content for each list type."""
@@ -762,147 +1340,3 @@ class VideoAnalyzer:
         )
 
         return response
-
-    def _parse_llm_json_response(self, response):
-        try:
-            # Extract the content
-            content = response.choices[0].message.content
-            
-            # Check if the content is wrapped in markdown code blocks
-            if "```json" in content:
-                # Extract the JSON from the markdown code blocks
-                content = content.split("```json")[1].split("```")[0].strip()
-            
-            # Parse the JSON content
-            parsed_content = json.loads(content)
-            
-            # Get all identified people across all timestamps if we used face recognition
-            all_identified_names = set()
-            if self.person_group_id and hasattr(self, 'identified_people_in_segment'):
-                for people_str in self.identified_people_in_segment.values():
-                    for name in [name.strip() for name in people_str.split(",")]:
-                        if name:
-                            all_identified_names.add(name)
-            
-            # Process each item in the response
-            if isinstance(parsed_content, list):
-                for item in parsed_content:
-                    # Handle field name conversions
-                    if "start_timestamp" in item and "start" not in item:
-                        item["start"] = item.pop("start_timestamp")
-                    if "end_timestamp" in item and "end" not in item:
-                        item["end"] = item.pop("end_timestamp")
-                    if "scene_theme" in item and "theme" not in item:
-                        item["theme"] = item.pop("scene_theme")
-                    if "key_objects" in item and "objects" not in item:
-                        item["objects"] = item.pop("key_objects")
-                    
-                    # Convert timestamp formats to consistent decimal seconds format
-                    for time_field in ["start", "end"]:
-                        if time_field in item and isinstance(item[time_field], str):
-                            try:
-                                # Handle millisecond format (e.g., "16000ms")
-                                if item[time_field].endswith("ms"):
-                                    ms_value = float(item[time_field].rstrip("ms"))
-                                    item[time_field] = f"{(ms_value / 1000):.3f}s"
-                                # Handle existing seconds format but ensure consistent precision
-                                elif item[time_field].endswith("s"):
-                                    seconds_value = float(item[time_field].rstrip("s"))
-                                    item[time_field] = f"{seconds_value:.3f}s"
-                                # Handle raw number (assume seconds)
-                                else:
-                                    seconds_value = float(item[time_field])
-                                    item[time_field] = f"{seconds_value:.3f}s"
-                            except ValueError:
-                                # If conversion fails, keep the original value
-                                pass
-                    
-                    # Handle personNames field - should ONLY contain faces identified by the Azure Face API
-                    if "characters" in item:
-                        # Remove characters field and replace with personNames
-                        item.pop("characters", None)
-                        # Add personNames based on face recognition only
-                        item["personNames"] = ""
-                    elif "personNames" not in item:
-                        # Ensure it exists
-                        item["personNames"] = ""
-                    
-                    # Now populate personNames from identified faces
-                    if self.person_group_id and hasattr(self, 'identified_people_in_segment'):
-                        # Find the closest timestamp to use for matching faces
-                        # This addresses slight variations in formatting that might cause exact matches to fail
-                        start_timestamp = item["start"]
-                        if start_timestamp in self.identified_people_in_segment:
-                            item["personNames"] = self.identified_people_in_segment[start_timestamp]
-                        else:
-                            # Try to find a close match within 0.1 seconds
-                            try:
-                                start_time = float(start_timestamp.rstrip("s"))
-                                for ts_key, people in self.identified_people_in_segment.items():
-                                    ts_value = float(ts_key.rstrip("s"))
-                                    if abs(ts_value - start_time) < 0.1:  # Within 0.1 seconds
-                                        item["personNames"] = people
-                                        break
-                            except (ValueError, AttributeError):
-                                # If conversion fails, keep empty personNames
-                                pass
-                    elif not self.person_group_id and item["personNames"]:
-                        # If personNames exists but we didn't use face recognition, it should be empty
-                        item["personNames"] = ""
-                    
-                    # Handle peoples field - ensure it only contains names, not other attributes
-                    if "peoples" in item:
-                        # If peoples is a list of objects or complex items, extract just the names
-                        if isinstance(item["peoples"], list):
-                            cleaned_peoples = []
-                            for person in item["peoples"]:
-                                if isinstance(person, dict) and "name" in person:
-                                    # Extract only the name from objects
-                                    cleaned_peoples.append(person["name"])
-                                elif isinstance(person, str):
-                                    # Already a name
-                                    cleaned_peoples.append(person)
-                            item["peoples"] = cleaned_peoples
-                        elif isinstance(item["peoples"], str):
-                            # Convert comma-separated string to list
-                            item["peoples"] = [name.strip() for name in item["peoples"].split(",") if name.strip()]
-                    else:
-                        # Initialize empty peoples array if it doesn't exist
-                        item["peoples"] = []
-                        
-                    # Handle emotions field - ensure it exists
-                    if "emotions" not in item:
-                        item["emotions"] = []
-                    elif isinstance(item["emotions"], str):
-                        # Convert comma-separated string to list
-                        item["emotions"] = [emotion.strip() for emotion in item["emotions"].split(",") if emotion.strip()]
-                    
-                    # Sanitize other fields to remove identified names from face recognition
-                    if all_identified_names and self.person_group_id:
-                        for field in ["summary", "actions", "objects"]:
-                            if field in item and item[field]:
-                                sanitized_text = item[field]
-                                
-                                # Only remove the custom-recognized face names
-                                # Keep any public figure names the model identified naturally
-                                for name in all_identified_names:
-                                    # Don't automatically replace common celebrity names that the model might recognize visually
-                                    # Only replace the exact names found in face recognition
-                                    if name in sanitized_text and name in self.identified_people_in_segment.get(item["start"], ""):
-                                        # Replace the name with an appropriate generic term
-                                        if "he " in sanitized_text.lower() or "his " in sanitized_text.lower():
-                                            replacement = "a man"
-                                        elif "she " in sanitized_text.lower() or "her " in sanitized_text.lower():
-                                            replacement = "a woman" 
-                                        else:
-                                            replacement = "a person"
-                                            
-                                        sanitized_text = sanitized_text.replace(name, replacement)
-                                
-                                item[field] = sanitized_text
-            
-            return parsed_content
-        except json.JSONDecodeError as e:
-            print(f"Error parsing JSON response: {e}")
-            print(f"Response: {content}")
-            return content

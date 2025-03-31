@@ -30,28 +30,36 @@ Always and only return as your output the updated Current Action Summary in form
 """
 
 action_summary_template = json.dumps(
-    [
-        {
-            "start": "4.97s",
-            "sentiment": "Positive, Negative, or Neutral",
-            "end": "16s",
-            "theme": "Dramatic",
-            "personNames": "",
-            "peoples": [],
-            "summary": "Summary of what is occuring around this timestamp with actions included, uses both transcript and frames to create full picture, be detailed and attentive, be serious and straightforward in your description.",
-            "actions": "Actions extracted via frame analysis. Focus on actions taken by each player, and team as a whole",
-            "objects": "Any objects in the timerange, include colors along with descriptions. all people should be in this, with as much detail as possible extracted from the frame (clothing,colors,age). Be incredibly detailed",
-        },
-        {
-            "start": "16s",
-            "sentiment": "Positive, Negative, or Neutral",
-            "end": "120s",
-            "theme": "Emotional, Heartfelt",
-            "personNames": "",
-            "peoples": [],
-            "summary": "Summary of what is occuring around this timestamp with actions included, uses both transcript and frames to create full picture, detailed and attentive, be serious and straightforward in your description.",
-            "actions": "Actions extracted via frame analysis. Focus on actions taken by each player, and team as a whole",
-            "objects": "Any objects in the timerange, include colors along with descriptions. all people should be in this, all people should be in this, with as much detail as possible extracted from the frame (clothing,colors,age). Be incredibly detailed",
-        },
-    ]
+    {
+        "actionSummary": {
+            "uniqueID": "0001",
+            "entities": {
+                "externalMetadata": None
+            },
+            "segments": [
+                {
+                    "insights": {
+                        "start": "4.97s",
+                        "sentiment": "Positive, Negative, or Neutral",
+                        "end": "16s",
+                        "emotions": [],
+                        "actions": [],
+                        "objects": [],
+                        "peoples": [],
+                        "personNames": "",
+                        "transcription": "Full transcription text for this segment",
+                        "theme": "Dramatic",
+                        "summary": "Summary of what is occurring around this timestamp with actions included, uses both transcript and frames to create full picture, be detailed and attentive, be serious and straightforward in your description.",
+                        "speechSegments": [
+                            {
+                                "text": "Individual speech segment text",
+                                "language": "en",
+                                "speaker": "1"
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    }
 )

@@ -175,38 +175,72 @@ def get_file_info(video_path):
         "-print_format", "json",
         "-show_format",
         "-show_streams",
+        "-select_streams", "a:0",  # Explicitly select first audio stream
         video_path
     ]
 
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, check=True)
-        # Parse the JSON output
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         ffprobe_info = json.loads(result.stdout)
         
         file_info = {}
-        if "streams" in ffprobe_info:
-            for stream in ffprobe_info["streams"]:
-                if stream["codec_type"] == "video":
-                    file_info["video_info"] = stream
-                if stream["codec_type"] == "audio":
-                    file_info["audio_info"] = stream
+        
+        # First check for audio stream
+        has_audio = False
+        for stream in ffprobe_info.get("streams", []):
+            if stream["codec_type"] == "audio":
+                has_audio = True
+                file_info["audio_info"] = stream
+                break
+        
+        # If no audio found through streams, try alternative check
+        if not has_audio:
+            cmd_check_audio = [
+                "ffmpeg",
+                "-i", video_path,
+                "-af", "volumedetect",
+                "-f", "null",
+                "-hide_banner",
+                "-"
+            ]
+            try:
+                result = subprocess.run(cmd_check_audio, capture_output=True, text=True)
+                has_audio = "mean_volume" in result.stderr
+            except Exception as e:
+                print(f"Secondary audio check failed: {e}")
+        
+        # Now get video info
+        cmd_video = [
+            "ffprobe",
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            "-show_streams",
+            "-select_streams", "v:0",  # Select first video stream
+            video_path
+        ]
+        video_result = subprocess.run(cmd_video, capture_output=True, text=True, check=True)
+        video_info = json.loads(video_result.stdout)
+        
+        for stream in video_info.get("streams", []):
+            if stream["codec_type"] == "video":
+                file_info["video_info"] = stream
+                break
         
         if "format" in ffprobe_info:
             file_info["format"] = ffprobe_info["format"]
             if "duration" in ffprobe_info["format"]:
                 file_info["duration"] = float(ffprobe_info["format"]["duration"])
         
+        # Set audio_found flag based on our checks
+        file_info["audio_found"] = has_audio
+        
         return file_info
     except subprocess.CalledProcessError as e:
-        print(
-            f"Failed to get info for file {video_path}\n"
-            f"{e.stderr}", end='', flush=True)
+        print(f"Failed to get info for file {video_path}\n{e.stderr}")
         return None
     except json.JSONDecodeError as e:
-        print(
-            f"Failed to parse ffprobe output for file {video_path}\n"
-            f"Error: {str(e)}\nOutput: {result.stdout}", end='', flush=True)
+        print(f"Failed to parse ffprobe output for file {video_path}\nError: {str(e)}\nOutput: {result.stdout}")
         return None
 
 

@@ -73,6 +73,7 @@ class VideoClient:
         trim_to_nearest_second=False,
         allow_partial_segments=True,
         overwrite_output=False,
+        use_speech_based_segments=False,
     ):
         video_manifest_path = self.preprocessor.preprocess_video(
             output_directory=output_directory,
@@ -83,6 +84,7 @@ class VideoClient:
             trim_to_nearest_second=trim_to_nearest_second,
             allow_partial_segments=allow_partial_segments,
             overwrite_output=overwrite_output,
+            use_speech_based_segments=use_speech_based_segments,
         )
         write_video_manifest(self.manifest)
         return video_manifest_path
