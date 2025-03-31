@@ -16,6 +16,8 @@ class Segment(BaseModel):
     analysis_completed: Optional[list] = []
     analyzed_result: Optional[dict] = {}
     transcription: Optional[str] = None
+    chapter: Optional[dict] = None
+    is_speech_based: Optional[bool] = False
 
 
 class SegmentMetadata(BaseModel):
@@ -43,11 +45,12 @@ class SourceAudioMetadata(BaseModel):
 
 class TargetPreprocessingParameters(BaseModel):
     output_directory: Optional[str] = None
-    segment_length: Optional[int] = None
+    segment_length: Optional[float] = None
     fps: Optional[float] = None
     generate_transcript_flag: Optional[bool] = True
     trim_to_nearest_second: Optional[bool] = False
     allow_partial_segments: Optional[bool] = True
+    use_speech_based_segments: Optional[bool] = False
 
 
 class VideoManifest(BaseModel):
@@ -62,3 +65,4 @@ class VideoManifest(BaseModel):
     final_summary: Optional[str] = None
     audio_transcription: Optional[Dict] = None
     source_audio: SourceAudioMetadata = Field(default_factory=SourceAudioMetadata)
+    global_tags: Dict[str, List] = Field(default_factory=lambda: {"persons": [], "actions": [], "objects": []})

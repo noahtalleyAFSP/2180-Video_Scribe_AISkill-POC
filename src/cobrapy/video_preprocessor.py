@@ -41,6 +41,7 @@ class VideoPreProcessor:
         trim_to_nearest_second=False,
         allow_partial_segments=True,
         overwrite_output=False,
+        use_speech_based_segments=False  # New parameter to enable speech-based segments
     ) -> str:
         start_time = time.time()
         print(
@@ -69,12 +70,16 @@ class VideoPreProcessor:
         print(f"({get_elapsed_time(start_time)}) Setting processing parameters...")
         self.manifest.processing_params.fps = fps
         self.manifest.processing_params.segment_length = segment_length
+        self.manifest.processing_params.use_speech_based_segments = use_speech_based_segments  # Save this setting
+        
         if self.manifest.source_video.audio_found is False:
             self.manifest.processing_params.generate_transcript_flag = False
+            if use_speech_based_segments:
+                print("Warning: No audio found in video, falling back to time-based segmentation")
+                self.manifest.processing_params.use_speech_based_segments = False
         else:
-            self.manifest.processing_params.generate_transcript_flag = (
-                generate_transcripts_flag
-            )
+            self.manifest.processing_params.generate_transcript_flag = generate_transcripts_flag
+
         self.manifest.processing_params.trim_to_nearest_second = trim_to_nearest_second
         self.manifest.processing_params.allow_partial_segments = allow_partial_segments
 
@@ -101,9 +106,22 @@ class VideoPreProcessor:
                 )
             )
 
-        # Generate the segments
+        # Extract the audio using FFmpeg first if needed for speech-based segmentation
+        if (
+            self.manifest.source_video.audio_found
+            and self.manifest.processing_params.generate_transcript_flag
+        ):
+            print(f"({get_elapsed_time(start_time)}s) Extracting audio...")
+            self._extract_audio(max_workers)
+        
+        # Generate the segments based on speech or time
         print(f"({get_elapsed_time(start_time)}s) Generating segments...")
-        self._generate_segments()
+        if use_speech_based_segments and self.manifest.audio_transcription:
+            self._generate_speech_based_segments()
+        else:
+            self._generate_segments()
+        
+        # Configure thread pool
         if max_workers is None:
             # Number of physical cores
             cpu_count = psutil.cpu_count(logical=False) or 1
@@ -111,14 +129,6 @@ class VideoPreProcessor:
             max_workers = min(cpu_count, int(memory // 2))
         else:
             max_workers = max_workers
-
-        # Extract the audio using FFmpeg
-        if (
-            self.manifest.source_video.audio_found
-            and self.manifest.processing_params.generate_transcript_flag
-        ):
-            print(f"({get_elapsed_time(start_time)}s) Extracting audio...")
-            self._extract_audio(max_workers)
 
         # Process the segments
         print(f"({get_elapsed_time(start_time)}s) Processing segments...")
@@ -251,17 +261,19 @@ class VideoPreProcessor:
                 start_time, end_time, input_video_path, segment_path, frames_dir, fps
             )
 
-            # Collect the generated frame filenames
+            # Calculate frame times based on actual extracted frames
             frame_files = sorted(os.listdir(frames_dir))
             number_of_frames = len(frame_files)
-
-            # Calculate frame times based on fps
+            
+            # Recalculate intervals based on actual frame count
             segment_duration = end_time - start_time
-            frame_times = [start_time + n /
-                           fps for n in range(number_of_frames)]
+            frame_times = np.linspace(start_time, end_time, number_of_frames, endpoint=False)
             frame_times = [round(t, 2) for t in frame_times]
-
-            # Rename frames to match the original naming convention
+            
+            segment.segment_frame_time_intervals = frame_times
+            segment.segment_frames_file_path = []
+            
+            # Rename frames with matching intervals
             for i, (frame_file, frame_time) in enumerate(zip(frame_files, frame_times)):
                 old_frame_path = os.path.join(frames_dir, frame_file)
                 new_frame_filename = f"frame_{i}_{frame_time}s.jpg"
@@ -277,11 +289,16 @@ class VideoPreProcessor:
             )
 
             # Process transcription if needed
-            if create_transcript_flag:
+            if create_transcript_flag and not segment.transcription:
+                # Only extract transcription if it wasn't already provided
+                # (which happens with speech-based segments)
                 transcript = self.manifest.audio_transcription
                 segment.transcription = parse_transcript(
                     transcript, start_time, end_time
                 )
+
+            # Update segment frame count
+            segment.number_of_frames = len(segment.segment_frames_file_path)
 
             return index, segment, True
         except Exception as e:
@@ -344,3 +361,118 @@ class VideoPreProcessor:
             self.manifest.source_audio.path = audio_path
             self.manifest.source_audio.file_size_mb = audio_file_size_mb
             self.manifest.audio_transcription = combined_transcript
+
+    def _generate_speech_based_segments(self):
+        """Generate segments based on natural speech breaks in the transcript."""
+        print("Generating speech-based segments...")
+        
+        # Check if we have a transcript
+        if not hasattr(self.manifest, 'audio_transcription') or not self.manifest.audio_transcription:
+            print("No transcription available, falling back to time-based segments")
+            return self._generate_segments()
+        
+        # Extract speech segments from transcript
+        segments_data = self.manifest.audio_transcription.get("segments", [])
+        
+        if not segments_data:
+            print("No speech segments found, falling back to time-based segments")
+            return self._generate_segments()
+        
+        print(f"Found {len(segments_data)} speech segments")
+        
+        # Group speech segments into logical groups
+        grouped_segments = []
+        current_group = []
+        current_duration = 0
+        max_duration = min(60, self.manifest.processing_params.segment_length * 3)  # Cap at 60s or 3x segment_length
+        min_duration = max(5, self.manifest.processing_params.segment_length / 2)    # Min 5s or half segment_length
+        
+        # Sort segments by start time
+        sorted_segments = sorted(segments_data, key=lambda x: x.get("offset", 0))
+        
+        for speech in sorted_segments:
+            speech_start = speech.get("offset", 0)
+            speech_duration = speech.get("duration", 0)
+            
+            # If this would make the segment too long, start a new one
+            if current_duration + speech_duration > max_duration and current_duration >= min_duration:
+                if current_group:
+                    grouped_segments.append(current_group)
+                current_group = [speech]
+                current_duration = speech_duration
+            else:
+                current_group.append(speech)
+                current_duration += speech_duration
+                
+            # If there's a significant pause after this speech (> 2 seconds)
+            # and we have enough content, start a new segment
+            if len(sorted_segments) > 1:
+                idx = sorted_segments.index(speech)
+                if idx < len(sorted_segments) - 1:
+                    next_speech = sorted_segments[idx + 1]
+                    next_start = next_speech.get("offset", 0)
+                    pause_duration = next_start - (speech_start + speech_duration)
+                    
+                    if pause_duration > 2 and current_duration >= min_duration:
+                        grouped_segments.append(current_group)
+                        current_group = []
+                        current_duration = 0
+        
+        # Add the last group if it's not empty
+        if current_group:
+            grouped_segments.append(current_group)
+        
+        # Create segments from the groups
+        segments = []
+        for i, group in enumerate(grouped_segments):
+            if not group:
+                continue
+            
+            # Calculate start and end times
+            start_time = min(speech.get("offset", 0) for speech in group)
+            end_time = max(speech.get("offset", 0) + speech.get("duration", 0) for speech in group)
+            
+            # Add small buffer at beginning and end
+            buffer = 0.5  # half second buffer
+            start_time = max(0, start_time - buffer)
+            end_time = min(self.manifest.source_video.duration, end_time + buffer)
+            
+            segment_duration = end_time - start_time
+            
+            # Create and set up the segment
+            segment = Segment()
+            segment.segment_name = f"segment_{i+1:04d}"
+            segment.segment_folder_path = os.path.join(
+                self.manifest.processing_params.output_directory, segment.segment_name
+            )
+            segment.start_time = start_time
+            segment.end_time = end_time
+            segment.segment_duration = segment_duration
+            
+            # Create segment folder
+            os.makedirs(segment.segment_folder_path, exist_ok=True)
+            
+            # Collect transcription for this segment
+            segment_text = " ".join(speech.get("text", "") for speech in group)
+            segment.transcription = segment_text
+            
+            # Mark the segment as speech based
+            segment.is_speech_based = True
+            
+            segments.append(segment)
+        
+        # If no valid groups were created, fall back to time-based segments
+        if not segments:
+            print("Could not create valid speech-based segments, falling back to time-based segments")
+            return self._generate_segments()
+        
+        print(f"Created {len(segments)} speech-based segments")
+        
+        # Update the manifest with the new segments
+        self.manifest.segments = segments
+        self.manifest.segment_metadata.num_segments = len(segments)
+        self.manifest.segment_metadata.effective_duration = sum(
+            segment.segment_duration for segment in segments
+        )
+        
+        return segments
