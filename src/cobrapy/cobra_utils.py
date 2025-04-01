@@ -12,6 +12,9 @@ from azure.ai.vision.face.models import FaceDetectionModel, FaceRecognitionModel
 from azure.core.credentials import AzureKeyCredential
 import json
 import logging
+import requests
+from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -30,138 +33,273 @@ def generate_safe_dir_name(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*.]', "_", name).replace(" ", "_")
 
 
-def generate_transcript(audio_file_path: str, env: CobraEnvironment) -> Dict:
+def generate_transcript_realtime_sdk(audio_file_path: str, env: CobraEnvironment) -> Dict:
     """
-    Generate transcript using Azure Speech Services.
+    Generate transcript using Azure Speech SDK (Real-time simulation).
     Returns a dictionary with word-level timing information.
+    DEPRECATED in favor of generate_batch_transcript for diarization/languageID.
     """
-    # First convert audio to correct format for Azure Speech
-    wav_path = f"{os.path.splitext(audio_file_path)[0]}_azure.wav"
-    cmd = [
-        "ffmpeg",
-        "-i", audio_file_path,
-        "-acodec", "pcm_s16le",
-        "-ac", "1",
-        "-ar", "16000",
-        wav_path,
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error"
-    ]
-    subprocess.run(cmd, check=True)
-    
-    speech_config = speechsdk.SpeechConfig(
-        subscription=env.speech.key.get_secret_value(),
-        region=env.speech.region
-    )
-    
-    audio_config = speechsdk.audio.AudioConfig(filename=wav_path)
-    speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+    print("WARNING: Using deprecated generate_transcript_realtime_sdk.")
+    # ... (keep the existing SDK code here if needed for reference) ...
+    # ... or just remove it if batch is the only way forward ...
+    # For now, let's raise an error to enforce Batch API usage
+    raise NotImplementedError("Real-time SDK transcription is deprecated. Use generate_batch_transcript.")
 
-    segments = []
-    done = False
-    error = None
 
-    def handle_result(evt):
-        nonlocal segments
-        if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-            segment = {
-                "text": evt.result.text,
-                "offset": evt.result.offset / 10000000,  # Convert ticks to seconds
-                "duration": evt.result.duration / 10000000,
-                "words": []
-            }
-            if hasattr(evt.result, "words"):
-                for word in evt.result.words:
-                    segment["words"].append({
-                        "word": word.word,
-                        "offset": word.offset / 10000000,
-                        "duration": word.duration / 10000000
-                    })
-            segments.append(segment)
-            logger.debug(f"Transcribed segment: {segment}")
+def generate_batch_transcript(
+    audio_blob_sas_url: str,
+    env: CobraEnvironment,
+    candidate_locales: List[str] = ["en-US"], # Default to English
+    enable_diarization: bool = True,
+    enable_word_timestamps: bool = True,
+    job_name_prefix: str = "cobra_batch_"
+) -> Optional[Dict]:
+    """
+    Generates transcript using Azure Batch Transcription REST API v3.2.
 
-    def handle_canceled(evt):
-        nonlocal done, error
-        if evt.cancellation_details.reason == speechsdk.CancellationReason.EndOfStream:
-            logger.info("Speech recognition completed successfully")
-        else:
-            error = f"Speech recognition canceled: {evt.cancellation_details.reason}"
-            if evt.cancellation_details.error_details:
-                error += f"\nError details: {evt.cancellation_details.error_details}"
-            logger.error(error)
-        done = True
+    Args:
+        audio_blob_sas_url: SAS URL for the audio file in Azure Blob Storage.
+        env: CobraEnvironment containing Speech and Blob Storage config.
+        candidate_locales: List of possible languages for identification.
+        enable_diarization: Whether to enable speaker separation.
+        enable_word_timestamps: Whether to request word-level timestamps.
+        job_name_prefix: Prefix for the transcription job display name.
 
-    def handle_session_stopped(evt):
-        nonlocal done
-        logger.info("Speech recognition stopped")
-        done = True
+    Returns:
+        A dictionary containing the parsed transcription results from the Batch API,
+        or None if the job fails.
+    """
+    start_t_batch = time.time()
+    print(f"({get_elapsed_time(start_t_batch)}s) Starting Batch Transcription process...")
 
-    speech_recognizer.recognized.connect(handle_result)
-    speech_recognizer.canceled.connect(handle_canceled)
-    speech_recognizer.session_stopped.connect(handle_session_stopped)
+    # --- Validate Config ---
+    if not env.speech or not env.speech.key or not env.speech.region:
+        raise ValueError("Speech key and region missing in environment configuration.")
+    if not audio_blob_sas_url:
+        raise ValueError("Audio Blob SAS URL is required.")
 
-    speech_recognizer.start_continuous_recognition()
-    
-    # Wait for transcription to complete with timeout
-    max_wait_time = 600  # 10 minutes timeout
-    wait_time = 0
-    while not done and wait_time < max_wait_time:
-        time.sleep(1)
-        wait_time += 1
-        if wait_time % 10 == 0:
-            logger.info(f"Transcription in progress... {wait_time}/{max_wait_time} seconds")
-    
-    speech_recognizer.stop_continuous_recognition()
-    
-    # Clean up temporary WAV file
-    try:
-        os.remove(wav_path)
-    except Exception as e:
-        logger.warning(f"Failed to remove temporary WAV file: {e}")
+    # --- Prepare API Request ---
+    speech_key = env.speech.key.get_secret_value()
+    speech_region = env.speech.region
+    endpoint = f"https://{speech_region}.api.cognitive.microsoft.com/speechtotext/v3.2/transcriptions"
 
-    if error:
-        raise Exception(error)
-
-    # Merge nearby segments
-    merged_segments = []
-    current_segment = None
-    for segment in sorted(segments, key=lambda x: x["offset"]):
-        if current_segment is None:
-            current_segment = segment
-        elif segment["offset"] - (current_segment["offset"] + current_segment["duration"]) < 0.5:
-            current_segment["duration"] = (segment["offset"] + segment["duration"]) - current_segment["offset"]
-            current_segment["text"] += " " + segment["text"]
-            if "words" in segment:
-                current_segment.setdefault("words", []).extend(segment["words"])
-        else:
-            merged_segments.append(current_segment)
-            current_segment = segment
-    
-    if current_segment:
-        merged_segments.append(current_segment)
-
-    return {
-        "text": " ".join(seg["text"] for seg in merged_segments),
-        "segments": merged_segments
+    headers = {
+        "Ocp-Apim-Subscription-Key": speech_key,
+        "Content-Type": "application/json"
     }
+
+    properties = {
+        "wordLevelTimestampsEnabled": enable_word_timestamps,
+        "punctuationMode": "DictatedAndAutomatic",
+        "profanityFilterMode": "Masked"
+    }
+
+    if enable_diarization:
+         properties["diarizationEnabled"] = True
+
+    # --- Modified Language Identification Logic (v2) ---
+    if not candidate_locales or len(candidate_locales) < 1:
+         # Should not happen with default, but safety check
+         raise ValueError("At least one candidate locale must be provided for transcription.")
+
+    # Ensure we have a base locale for the 'locale' property
+    base_locale = candidate_locales[0]
+
+    # Prepare the list for languageIdentification - ensure minimum of 2
+    id_locales = list(candidate_locales) # Create a copy
+    if len(id_locales) == 1:
+        # Add a default second locale if only one was provided
+        # Choose a common but distinct language like Spanish
+        default_second_locale = "es-ES"
+        if base_locale != default_second_locale: # Avoid adding the same locale twice
+            id_locales.append(default_second_locale)
+            print(f"DEBUG: Adding '{default_second_locale}' to meet language ID requirement (min 2).")
+        else:
+             # If the base was es-ES, add en-US as the second
+             id_locales.append("en-US")
+             print(f"DEBUG: Adding 'en-US' to meet language ID requirement (min 2).")
+
+
+    # Now, add the languageIdentification property with the adjusted list (>= 2 locales)
+    properties["languageIdentification"] = {
+        "candidateLocales": id_locales
+    }
+    print(f"DEBUG: Requesting language identification with candidates: {id_locales}")
+    # --- End Modified Logic (v2) ---
+
+
+    payload = {
+        "contentUrls": [audio_blob_sas_url],
+        "locale": base_locale, # Required: Primary language guess/target
+        "displayName": f"{job_name_prefix}{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+        "properties": properties, # Now always includes languageIdentification with >= 2 locales
+        # Optional: Specify destinationContainerUrl if you want results in your own blob storage
+        # "destinationContainerUrl": "YOUR_CONTAINER_SAS_URL_WITH_WRITE_PERMISSIONS"
+        # Optional: timeToLive (e.g., "PT12H" for 12 hours) for automatic deletion
+        # "timeToLive": "PT24H"
+    }
+
+    # --- Submit Transcription Job ---
+    print(f"({get_elapsed_time(start_t_batch)}s) Submitting job to {endpoint}...")
+    try:
+        submit_response = requests.post(endpoint, headers=headers, json=payload)
+        submit_response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        submit_data = submit_response.json()
+        job_status_url = submit_data.get("self")
+        if not job_status_url:
+             raise ValueError("API did not return a job status URL.")
+        print(f"({get_elapsed_time(start_t_batch)}s) Job submitted successfully. Status URL: {job_status_url}")
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: Failed to submit transcription job: {e}")
+        if submit_response is not None:
+             print(f"Response Status: {submit_response.status_code}")
+             print(f"Response Body: {submit_response.text}")
+        return None
+    except Exception as e:
+         print(f"ERROR: Unexpected error submitting job: {e}")
+         return None
+
+    # --- Poll Job Status ---
+    print(f"({get_elapsed_time(start_t_batch)}s) Polling job status...")
+    job_result_files_url = None
+    max_polling_time = 1800 # 30 minutes timeout for polling
+    polling_start_time = time.time()
+    polling_interval = 30 # seconds
+
+    while time.time() - polling_start_time < max_polling_time:
+        try:
+            status_response = requests.get(job_status_url, headers=headers)
+            status_response.raise_for_status()
+            status_data = status_response.json()
+            job_status = status_data.get("status")
+
+            print(f"({get_elapsed_time(start_t_batch)}s) Job Status: {job_status}")
+
+            if job_status == "Succeeded":
+                job_result_files_url = status_data.get("links", {}).get("files")
+                if not job_result_files_url:
+                     print("ERROR: Job succeeded but no result files URL found.")
+                     return None
+                print(f"({get_elapsed_time(start_t_batch)}s) Job Succeeded. Result files URL: {job_result_files_url}")
+                break
+            elif job_status == "Failed":
+                print(f"ERROR: Transcription job failed.")
+                print(f"Failure details: {status_data.get('properties', {}).get('error')}")
+                return None
+            elif job_status in ["NotStarted", "Running"]:
+                 time.sleep(polling_interval)
+            else:
+                 print(f"ERROR: Unknown job status encountered: {job_status}")
+                 return None
+
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: Failed to poll job status: {e}")
+            # Optional: retry polling a few times before failing
+            time.sleep(polling_interval * 2) # Wait longer on error
+        except Exception as e:
+            print(f"ERROR: Unexpected error during polling: {e}")
+            return None
+    else: # Loop exited due to timeout
+         print(f"ERROR: Polling timed out after {max_polling_time} seconds.")
+         return None
+
+    # --- Retrieve Result File URL ---
+    if not job_result_files_url: return None # Should not happen if loop exited correctly
+
+    print(f"({get_elapsed_time(start_t_batch)}s) Retrieving result file list...")
+    try:
+        files_response = requests.get(job_result_files_url, headers=headers)
+        files_response.raise_for_status()
+        files_data = files_response.json()
+
+        transcription_file_url = None
+        for file_info in files_data.get("values", []):
+            if file_info.get("kind") == "Transcription":
+                 transcription_file_url = file_info.get("links", {}).get("contentUrl")
+                 break
+
+        if not transcription_file_url:
+             print("ERROR: Could not find Transcription file URL in results.")
+             return None
+        print(f"({get_elapsed_time(start_t_batch)}s) Transcription result file URL: {transcription_file_url}")
+
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: Failed to retrieve result file list: {e}")
+        return None
+    except Exception as e:
+         print(f"ERROR: Unexpected error retrieving file list: {e}")
+         return None
+
+    # --- Download and Parse Result File ---
+    print(f"({get_elapsed_time(start_t_batch)}s) Downloading transcription result...")
+    try:
+        # Note: The result file URL from Azure is typically a SAS URL itself
+        result_response = requests.get(transcription_file_url)
+        result_response.raise_for_status()
+        # Ensure content is decoded correctly (Azure usually uses UTF-8)
+        result_response.encoding = result_response.apparent_encoding or 'utf-8'
+        result_json = result_response.json()
+        print(f"({get_elapsed_time(start_t_batch)}s) Transcription result downloaded and parsed.")
+
+        # --- Optional: Delete Job ---
+        # Consider deleting the job to clean up Azure resources
+        # try:
+        #     print(f"({get_elapsed_time(start_t_batch)}s) Deleting transcription job...")
+        #     delete_response = requests.delete(job_status_url, headers=headers)
+        #     delete_response.raise_for_status()
+        #     print(f"({get_elapsed_time(start_t_batch)}s) Job deleted.")
+        # except Exception as e:
+        #     print(f"Warning: Failed to delete transcription job {job_status_url}: {e}")
+
+        return result_json
+
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: Failed to download result file: {e}")
+        if result_response is not None:
+            print(f"Download Response Status: {result_response.status_code}")
+            print(f"Download Response Body: {result_response.text[:500]}...") # Show start of body
+        return None
+    except json.JSONDecodeError as e:
+         print(f"ERROR: Failed to parse result JSON: {e}")
+         print(f"Downloaded content: {result_response.text[:500]}...")
+         return None
+    except Exception as e:
+        print(f"ERROR: Unexpected error processing result file: {e}")
+        return None
 
 
 def parse_transcript(transcript_object: Dict, start_time: float, end_time: float) -> str:
-    """Parse the transcript object and return text for the specified time range."""
+    """
+    Parse the transcript object (from Batch API) and return text for the specified time range.
+    """
     if not isinstance(transcript_object, dict):
-        raise TypeError("The transcript object must be a dictionary.")
-    
-    relevant_segments = []
-    for segment in transcript_object.get("segments", []):
-        segment_start = segment["offset"]
-        segment_end = segment_start + segment["duration"]
-        
-        if (segment_start >= start_time and segment_start < end_time) or \
-           (segment_end > start_time and segment_end <= end_time):
-            relevant_segments.append(segment["text"])
-    
-    return " ".join(relevant_segments)
+        # print(f"Warning: Expected dict for transcript object, got {type(transcript_object)}")
+        return "Transcription data unavailable or invalid."
+
+    relevant_phrases = []
+    # Use the 'recognizedPhrases' key expected from Batch API
+    for phrase in transcript_object.get("recognizedPhrases", []):
+        if not isinstance(phrase, dict): continue
+
+        try:
+             # Ticks to seconds conversion
+             phrase_start = phrase.get("offsetInTicks", 0) / 10_000_000.0
+             phrase_duration = phrase.get("durationInTicks", 0) / 10_000_000.0
+             phrase_end = phrase_start + phrase_duration
+
+             # Check for overlap with the segment time range
+             # Phrase starts within segment OR Phrase ends within segment OR Phrase engulfs segment
+             if (phrase_start < end_time) and (phrase_end > start_time):
+                  # Extract the display text from the best hypothesis
+                  best_recognition = phrase.get("nBest", [{}])[0]
+                  display_text = best_recognition.get("display", None)
+                  if display_text:
+                       relevant_phrases.append(display_text)
+        except (TypeError, IndexError, KeyError, ValueError) as e:
+             print(f"Warning: Error processing transcript phrase: {e}. Data: {phrase}")
+             continue
+
+    return " ".join(relevant_phrases) if relevant_phrases else "No transcription for this time range."
 
 
 def get_file_info(video_path):
@@ -285,21 +423,39 @@ def segment_and_extract(
 
 
 def extract_base_audio(video_path, audio_path):
+    # Ensure the output path has a .wav extension
+    if not audio_path.lower().endswith(".wav"):
+         print(f"Warning: Forcing audio output path to .wav for compatibility: {audio_path}")
+         # Correct the path if needed (optional, but good practice)
+         audio_path = os.path.splitext(audio_path)[0] + ".wav"
+
     cmd = [
         "ffmpeg",
         "-i",
         video_path,
-        "-q:a",
-        "0",
-        "-map",
-        "a",
+        # --- WAV Specific Settings ---
+        "-vn",  # Disable video recording
+        "-acodec", "pcm_s16le",  # Use 16-bit PCM codec
+        "-ar", "16000",  # Set audio sample rate to 16kHz
+        "-ac", "1",  # Set audio channels to 1 (mono)
+        # --- End WAV Specific Settings ---
+        # Remove MP3 quality setting: "-q:a", "0", 
+        # Remove map setting as we only want audio: "-map", "a", 
         audio_path,
         "-y",  # Overwrite output file if it exists
         "-hide_banner",
         "-loglevel",
         "error",
     ]
-    subprocess.run(cmd, check=True)
+    print(f"Running ffmpeg to extract WAV: {' '.join(cmd)}") # Log the command
+    try:
+        subprocess.run(cmd, check=True)
+        print("ffmpeg WAV extraction completed successfully.")
+    except subprocess.CalledProcessError as e:
+         print(f"ffmpeg WAV extraction failed: {e}")
+         # Optionally capture and print stderr
+         # print(f"ffmpeg stderr: {e.stderr}")
+         raise # Re-raise the error to stop processing
 
 
 def extract_audio_chunk(args):

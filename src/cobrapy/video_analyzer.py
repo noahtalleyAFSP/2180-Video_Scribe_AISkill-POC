@@ -188,154 +188,199 @@ class VideoAnalyzer:
                 f"You have provided an AnalyisConfig with a analysis_sequence that has not yet been implmented: {analysis_config.analysis_sequence}"
             )
 
-        # --- EDIT 2: Conditional Aggregation ---
+        # --- EDIT 2: Conditional Aggregation & Manifest Update ---
         final_results = {}
         if has_custom_aggregation and isinstance(results_list_or_aggregated, dict):
-             # If custom aggregation ran and returned a dict, use it directly
              print("Using results from custom aggregation method.")
-             final_results = results_list_or_aggregated
-             # Ensure manifest tags are updated (might already be done in _analyze_segment_list*)
-             if "global_tags" in final_results:
-                 self.manifest.global_tags = final_results["global_tags"]
+             # --- Check for new structure ---
+             if "actionSummary" in results_list_or_aggregated:
+                  print("Detected 'actionSummary' structure from custom aggregation.")
+                  final_results = results_list_or_aggregated # Keep the whole new structure for the _ActionSummary.json file
+
+                  # --- Update manifest.global_tags (Requires reformatting back to plural keys) ---
+                  action_summary_content = final_results.get("actionSummary", {})
+                  # Extract lists using singular keys, assign to manifest using plural keys
+                  manifest_global_tags = {
+                       "persons": action_summary_content.get("person", []),
+                       "actions": action_summary_content.get("action", []),
+                       "objects": action_summary_content.get("object", [])
+                  }
+                  self.manifest.global_tags = manifest_global_tags
+                  print("DEBUG: Updated self.manifest.global_tags using data from actionSummary (reverted to plural keys).")
+
+             else:
+                  # --- Handle old custom aggregation structure (if needed) ---
+                  print("Assuming standard structure from custom aggregation (no 'actionSummary' key found).")
+                  final_results = results_list_or_aggregated
+                  if "global_tags" in final_results:
+                      self.manifest.global_tags = final_results["global_tags"]
+                      print("DEBUG: Updated self.manifest.global_tags from standard custom aggregation.")
+
         elif isinstance(results_list_or_aggregated, list):
-             # If no custom aggregation or it returned a list (or refine was used), run generic aggregation
-             print("Running generic aggregation.")
+             # --- Generic Aggregation (produces standard structure) ---
+             print("Running generic aggregation (produces standard structure).")
+             # --- Restore Generic Aggregation Logic ---
              try:
-                # Initialize combined results structure
-                all_chapters = []
-                global_tags_agg = { # Use a different name to avoid confusion
-                    "persons": {},
-                    "actions": {},
-                    "objects": {}
-                }
+                 # Initialize combined results structure
+                 all_chapters = []
+                 global_tags_agg_dict = { # Use a temporary dict to collect tags by name
+                     "persons": {},
+                     "actions": {},
+                     "objects": {}
+                 }
 
-                # Process each segment's results (assuming results_list_or_aggregated is a list here)
-                for segment_response in results_list_or_aggregated:
-                    if not isinstance(segment_response, dict):
-                        print(f"Warning: Skipping non-dictionary item in results list: {type(segment_response)}")
-                        continue
+                 # Process each segment's results from the list
+                 for result_container in results_list_or_aggregated:
+                     if not isinstance(result_container, dict):
+                         print(f"Warning: Skipping non-dictionary item in results list during generic agg: {type(result_container)}")
+                         continue
 
-                    # Add chapters
-                    chapters_data = segment_response.get("chapters", [])
-                    if isinstance(chapters_data, dict):
-                        all_chapters.append(chapters_data)
-                    elif isinstance(chapters_data, list):
-                        all_chapters.extend(chapters_data)
-                    else:
-                        print(f"Warning: Unexpected data type for 'chapters': {type(chapters_data)}")
+                     # Assume the structure is {"analysis_result": {...}, "segment_name": ..., ...}
+                     segment_response = result_container.get("analysis_result", {})
+                     if not isinstance(segment_response, dict):
+                          print(f"Warning: Skipping item with non-dict 'analysis_result' during generic agg: {type(segment_response)}")
+                          continue
 
-                    # Merge global tags
-                    tags_data = segment_response.get("global_tags", {})
-                    if not isinstance(tags_data, dict):
-                        print(f"Warning: Unexpected data type for 'global_tags': {type(tags_data)}")
-                        continue
+                     # Add chapters
+                     chapters_data = segment_response.get("chapters", [])
+                     if isinstance(chapters_data, dict): # Handle potential single chapter object
+                         all_chapters.append(chapters_data)
+                     elif isinstance(chapters_data, list):
+                         all_chapters.extend(chap for chap in chapters_data if isinstance(chap, dict)) # Add only valid chapter dicts
+                     else:
+                         print(f"Warning: Unexpected data type for 'chapters' during generic agg: {type(chapters_data)}")
 
-                    for category in ["persons", "actions", "objects"]:
-                        if category not in tags_data or not isinstance(tags_data[category], list):
-                            continue
+                     # Merge global tags
+                     tags_data = segment_response.get("global_tags", {})
+                     if not isinstance(tags_data, dict):
+                         print(f"Warning: Unexpected data type for 'global_tags' during generic agg: {type(tags_data)}")
+                         continue
 
-                        for tag in tags_data[category]:
-                            if not isinstance(tag, dict):
-                                 print(f"Warning: Skipping non-dictionary tag in '{category}': {type(tag)}")
+                     for category in ["persons", "actions", "objects"]:
+                         if category not in tags_data or not isinstance(tags_data.get(category), list): # Check if key exists and is a list
+                             continue
+
+                         for tag_obj in tags_data[category]:
+                             if not isinstance(tag_obj, dict):
+                                 print(f"Warning: Skipping non-dictionary tag in '{category}' during generic agg: {type(tag_obj)}")
                                  continue
-                            name = tag.get("name")
-                            if not name or not isinstance(name, str) or not name.strip():
-                                print(f"Warning: Skipping tag in '{category}' with missing or invalid name: {tag}")
-                                continue
+                             name = tag_obj.get("name")
+                             if not name or not isinstance(name, str) or not name.strip():
+                                 print(f"Warning: Skipping tag in '{category}' with missing/invalid name during generic agg: {tag_obj}")
+                                 continue
 
-                            cleaned_name = name.strip()
-                            if cleaned_name not in global_tags_agg[category]:
-                                global_tags_agg[category][cleaned_name] = { "name": cleaned_name, "timecodes": [] }
+                             cleaned_name = name.strip()
+                             if cleaned_name not in global_tags_agg_dict[category]:
+                                 # Initialize the structure for this tag name
+                                 global_tags_agg_dict[category][cleaned_name] = {"name": cleaned_name, "timecodes": []}
 
-                            timecodes = tag.get("timecodes", [])
-                            if isinstance(timecodes, list):
-                                valid_timecodes = [tc for tc in timecodes if isinstance(tc, dict) and "start" in tc and "end" in tc]
-                                global_tags_agg[category][cleaned_name]["timecodes"].extend(valid_timecodes)
-                            else:
-                                print(f"Warning: Unexpected timecode format for tag '{cleaned_name}': {timecodes}")
+                             timecodes = tag_obj.get("timecodes", [])
+                             if isinstance(timecodes, list):
+                                 # Add only valid timecode dictionaries
+                                 valid_timecodes = [tc for tc in timecodes if isinstance(tc, dict) and "start" in tc and "end" in tc]
+                                 global_tags_agg_dict[category][cleaned_name]["timecodes"].extend(valid_timecodes)
+                             else:
+                                 print(f"Warning: Unexpected timecode format for tag '{cleaned_name}' during generic agg: {timecodes}")
 
-                # Convert dict back to lists and clean up timecodes
-                final_global_tags_agg = {}
-                for category, tags_dict in global_tags_agg.items():
-                    tag_list = []
-                    for tag_obj in tags_dict.values():
-                        unique_timecodes_set = set(tuple(sorted(d.items())) for d in tag_obj["timecodes"])
-                        unique_timecodes_list = sorted(
-                            [dict(t) for t in unique_timecodes_set],
-                            key=lambda x: float(str(x.get("start", "inf")).rstrip("s"))
-                        )
-                        tag_obj["timecodes"] = unique_timecodes_list
-                        tag_list.append(tag_obj)
-                    final_global_tags_agg[category] = tag_list
+                 # Convert aggregated dict back to list structure and clean up timecodes
+                 final_global_tags_agg = {} # This variable will now be defined
+                 for category, tags_dict in global_tags_agg_dict.items():
+                     tag_list = []
+                     for tag_name, tag_object in tags_dict.items():
+                         # Deduplicate and sort timecodes
+                         unique_timecodes_set = set(tuple(sorted(d.items())) for d in tag_object["timecodes"])
+                         unique_timecodes_list = sorted(
+                             [dict(t) for t in unique_timecodes_set],
+                             # Handle potential float conversion errors gracefully
+                             key=lambda x: float(str(x.get("start", "inf")).rstrip("s")) if str(x.get("start", "inf")).rstrip("s").replace('.', '', 1).isdigit() else float('inf')
+                         )
+                         tag_object["timecodes"] = unique_timecodes_list
+                         tag_list.append(tag_object) # Append the dict {name: ..., timecodes: [...]}
+                     final_global_tags_agg[category] = tag_list # Final structure uses plural keys
 
-                # Create final results
-                final_results = {
-                    "chapters": all_chapters,
-                    "global_tags": final_global_tags_agg
-                }
-
-                # Update manifest's global tags
-                self.manifest.global_tags = final_global_tags_agg
+                 # Create final results dictionary for this path
+                 final_results = {
+                     "chapters": all_chapters,
+                     "global_tags": final_global_tags_agg # Use the final aggregated list structure
+                 }
 
              except Exception as e:
-                print(f"Error during generic aggregation: {e}")
-                print("Attempting to save raw results list instead.")
-                # Fallback to save raw list if aggregation fails
-                error_output_path = os.path.join(
-                    self.manifest.processing_params.output_directory,
-                    f"_video_analysis_results_{analysis_config.name}_aggregation_error.json",
-                )
-                os.makedirs(os.path.dirname(error_output_path), exist_ok=True)
-                with open(error_output_path, "w", encoding="utf-8") as f:
-                    # Save the raw list that caused the error
-                    json.dump(results_list_or_aggregated, f, indent=4, ensure_ascii=False)
-                raise ValueError(
-                    f"Error during generic aggregation. Raw results list saved to {error_output_path}. Error: {e}"
-                )
-        else:
-             # Handle cases where results_list_or_aggregated is neither dict nor list after analysis
-             print(f"Warning: Unexpected result type after analysis: {type(results_list_or_aggregated)}. Cannot aggregate.")
-             # Consider initializing final_results to empty or raising an error
-             final_results = {"chapters": [], "global_tags": {"persons": [], "actions": [], "objects": []}}
-             self.manifest.global_tags = final_results["global_tags"]
+                 print(f"Error during generic aggregation: {e}")
+                 print("Attempting to save raw results list instead.")
+                 # Fallback to save raw list if aggregation fails
+                 error_output_path = os.path.join(
+                     self.manifest.processing_params.output_directory,
+                     f"_video_analysis_results_{analysis_config.name}_generic_aggregation_error.json",
+                 )
+                 os.makedirs(os.path.dirname(error_output_path), exist_ok=True)
+                 with open(error_output_path, "w", encoding="utf-8") as f:
+                     # Save the raw list that caused the error
+                     json.dump(results_list_or_aggregated, f, indent=4, ensure_ascii=False)
+                 raise ValueError(
+                     f"Error during generic aggregation. Raw results list saved to {error_output_path}. Error: {e}"
+                 )
+             # --- End Restore ---
+
+             # Ensure self.manifest.global_tags is updated here too if generic runs
+             if 'final_global_tags_agg' in locals(): # Check if generic agg ran and produced tags
+                  self.manifest.global_tags = final_global_tags_agg
+                  print("DEBUG: Updated self.manifest.global_tags from generic aggregation.")
 
 
-        # -- The rest of the function remains largely the same, operating on final_results --
+        # -- Summary Generation & Saving --
         try:
-            # Generate final summary if enabled (using the correctly determined final_results)
+            # Generate final summary if enabled
             if hasattr(analysis_config, "run_final_summary") and analysis_config.run_final_summary:
-                # Check if final_results has content before summarizing
-                if final_results and (final_results.get("chapters") or final_results.get("global_tags")):
-                    print(f"Generating final summary for {self.manifest.name}")
-                    summary_prompt = self.generate_summary_prompt(analysis_config, final_results)
-                    summary_results = self._call_llm(summary_prompt)
-                    self.manifest.final_summary = summary_results.choices[0].message.content
-                    final_results["final_summary"] = self.manifest.final_summary
-                else:
+                content_to_summarize = final_results
+                summary_target_dict = final_results # Default target for summary
+                summary_text = "Analysis resulted in empty chapters and tags." # Default summary
+                should_generate_summary = False
+
+                if "actionSummary" in final_results:
+                     action_summary_content = final_results["actionSummary"]
+                     summary_target_dict = action_summary_content # Put summary inside actionSummary
+                     # Check if there's content inside actionSummary to summarize
+                     if action_summary_content and \
+                        (action_summary_content.get("chapter") or \
+                         action_summary_content.get("person") or \
+                         action_summary_content.get("action") or \
+                         action_summary_content.get("object")):
+                          should_generate_summary = True
+                     else:
+                          print("Skipping final summary generation due to empty actionSummary content.")
+
+                # Check standard structure (if not actionSummary)
+                elif final_results and (final_results.get("chapters") or final_results.get("global_tags")):
+                    should_generate_summary = True
+                else: # Standard structure but empty
                     print("Skipping final summary generation due to empty analysis results.")
-                    self.manifest.final_summary = "Analysis resulted in empty chapters and global tags."
-                    final_results["final_summary"] = self.manifest.final_summary
+                    # Add default summary to top level if standard structure
+                    final_results["final_summary"] = summary_text
+
+                # Generate summary if content exists
+                if should_generate_summary:
+                     print(f"Generating final summary for {self.manifest.name}")
+                     summary_prompt = self.generate_summary_prompt(analysis_config, content_to_summarize)
+                     summary_results = self._call_llm(summary_prompt)
+                     summary_text = summary_results.choices[0].message.content
+                     summary_target_dict["final_summary"] = summary_text # Add summary to correct dict (actionSummary or final_results)
+                     print(f"DEBUG: Added final_summary to {'actionSummary object' if 'actionSummary' in final_results else 'top level'}.")
+
+                # Always update the manifest's final summary field
+                self.manifest.final_summary = summary_text
 
 
-            # Save results
+            # Save the _ActionSummary.json results
             final_results_output_path = os.path.join(
                 self.manifest.processing_params.output_directory,
-                f"_{analysis_config.name}.json",
+                f"_{analysis_config.name}.json", # e.g., _ActionSummary.json
             )
-            
-            print(f"Writing results to {final_results_output_path}")
-            # Ensure directory exists before writing
+            print(f"Writing final results structure to {final_results_output_path}")
             os.makedirs(os.path.dirname(final_results_output_path), exist_ok=True)
             with open(final_results_output_path, "w", encoding="utf-8") as f:
-                # Ensure final_results is a dict before dumping
-                if isinstance(final_results, dict):
-                     f.write(json.dumps(final_results, indent=4, ensure_ascii=False))
-                else:
-                     print(f"ERROR: final_results is not a dict ({type(final_results)}), cannot write JSON.")
-                     # Optionally write the raw data if it's not None
-                     if results_list_or_aggregated:
-                          f.write(json.dumps(results_list_or_aggregated, indent=4, ensure_ascii=False))
-
+                 # final_results contains the full structure ('actionSummary' key or standard)
+                 json_obj = json.loads(json.dumps(final_results)) # Ensure clean serializable dict
+                 f.write(json.dumps(json_obj, indent=4, ensure_ascii=False))
 
         except Exception as e: # Catch potential errors during summary or saving
             print(f"Error during final summary generation or saving results: {e}")
@@ -390,23 +435,20 @@ class VideoAnalyzer:
             parsed_response = self._analyze_segment(
                 segment=segment, analysis_config=analysis_config
             )
-            # --- EDIT 3: Pass the segment object along with the response ---
-            # Store the response AND the segment object info needed for boundary checking
             results_list.append({
                 "analysis_result": parsed_response,
                 "segment_name": segment.segment_name,
                 "start_time": segment.start_time,
-                "end_time": segment.end_time
+                "end_time": segment.end_time,
+                "frame_paths": segment.segment_frames_file_path,
+                # Pass the whole transcription object once (it's the same for all segments)
+                "full_transcription_object": self.manifest.audio_transcription if not results_list else None # Pass only for first segment
              })
-            # --- End EDIT 3 ---
-
 
         # After all segments have been analyzed
         if hasattr(analysis_config, 'process_segment_results'):
             # Use the custom processing method if available
-            # --- EDIT 4: Pass the enriched results_list ---
             final_results = analysis_config.process_segment_results(results_list)
-            # --- End EDIT 4 ---
             # Update the manifest's global_tags (Keep existing fix)
             if isinstance(final_results, dict) and "global_tags" in final_results:
                  self.manifest.global_tags = final_results["global_tags"]
@@ -424,7 +466,7 @@ class VideoAnalyzer:
              # For simplicity here, we just return the raw list and let analyze_video handle it.
              # Alternatively, you could replicate the generic agg logic from analyze_video here.
              # Let's return the raw list for analyze_video to handle.
-             return results_list # Return list of dicts {"analysis_result":..., "segment_name":...}
+             return results_list # Return list including frame_paths
              # --- End EDIT 5 ---
 
     def _analyze_segment_list_sequentially(
@@ -536,10 +578,7 @@ class VideoAnalyzer:
                 user_content.append(
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}",
-                            "detail": "low",
-                        },
+                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}", "detail": "low"},
                     }
                 )
 
@@ -593,15 +632,16 @@ class VideoAnalyzer:
 
         async def sem_task(segment):
             async with sempahore:
-                # --- EDIT 6: Return segment info along with result ---
                 parsed_response = await self._analyze_segment_async(segment, analysis_config)
                 return {
                     "analysis_result": parsed_response,
                     "segment_name": segment.segment_name,
                     "start_time": segment.start_time,
-                    "end_time": segment.end_time
+                    "end_time": segment.end_time,
+                    "frame_paths": segment.segment_frames_file_path,
+                    # Pass the whole transcription object - will need to handle potential multiple copies in aggregation
+                    "full_transcription_object": self.manifest.audio_transcription
                 }
-                # --- End EDIT 6 ---
 
         async def return_value_task(segment):
             return segment.analyzed_result[analysis_config.name]
@@ -625,9 +665,8 @@ class VideoAnalyzer:
 
         # --- Aggregation Logic ---
         if hasattr(analysis_config, 'process_segment_results'):
-            # --- EDIT 7: Pass the enriched results_list ---
+            # Pass the list containing transcription objects to aggregation
             final_results_agg = analysis_config.process_segment_results(results_list)
-            # --- End EDIT 7 ---
             # Update the manifest's global_tags with the aggregated results (Keep existing fix)
             if isinstance(final_results_agg, dict) and "global_tags" in final_results_agg:
                  self.manifest.global_tags = final_results_agg["global_tags"]
@@ -638,10 +677,8 @@ class VideoAnalyzer:
             # --- Return the AGGREGATED results ---
             return final_results_agg # Return aggregated results
         else:
-             # --- EDIT 8: Return raw list if no custom method ---
-             print("Running generic aggregation within _analyze_segment_list_async (will be handled by analyze_video).")
-             return results_list # Return list of dicts {"analysis_result":..., "segment_name":...}
-             # --- End EDIT 8 ---
+             # ... (rest of generic aggregation handling) ...
+             return results_list # Return list including frame_paths
 
     def _analyze_segment(
         self,
@@ -658,87 +695,119 @@ class VideoAnalyzer:
         print(f"Analyzing segment {segment.segment_name} ({segment.start_time:.3f}s - {segment.end_time:.3f}s)")
         stopwatch_segment = time.time()
 
-        # --- Stage 1: Get Chapters (Full Segment Context) ---
-        print(f"  - Stage 1: Requesting Chapters...")
-        chapter_prompt = self._generate_segment_prompt(
-            segment=segment,
-            analysis_config=analysis_config,
-            generate_chapters=True,
-            generate_tags=False # Ask ONLY for chapters
-        )
-        chapters_result = {"chapters": []} # Default
-        if chapter_prompt:
-            try:
-                chapter_llm_response = self._call_llm(chapter_prompt)
-                chapters_result = self._parse_llm_json_response(
-                    chapter_llm_response,
-                    expecting_chapters=True,
-                    expecting_tags=False # Parse only chapters
-                 )
-                print(f"  - Stage 1: Received {len(chapters_result.get('chapters',[]))} chapter(s).")
-            except Exception as e:
-                print(f"Error getting chapters for segment {segment.segment_name}: {e}")
-                # Proceed with empty chapters, tags might still work
+        # --- Retry Parameters ---
+        max_retries = 3
+        initial_delay = 1.0 # seconds
 
-        # --- Stage 2: Get Tags (Chunked Analysis) ---
+        # --- Stage 1: Get Chapters (Full Segment Context) with Retry ---
+        print(f"  - Stage 1: Requesting Chapters...")
+        chapters_result = {"chapters": []} # Default
+        for attempt in range(max_retries):
+            try:
+                chapter_prompt = self._generate_segment_prompt(
+                    segment=segment,
+                    analysis_config=analysis_config,
+                    generate_chapters=True,
+                    generate_tags=False
+                )
+                if chapter_prompt:
+                    chapter_llm_response = self._call_llm(chapter_prompt)
+                    chapters_result = self._parse_llm_json_response(
+                        chapter_llm_response,
+                        expecting_chapters=True,
+                        expecting_tags=False
+                    )
+                    # Add a check: if parsing failed and returned default, it counts as an error for retry
+                    if not chapters_result.get("chapters"): # Check if key has content
+                        # Check if the raw response was likely empty or problematic
+                        raw_content_check = chapter_llm_response.choices[0].message.content.strip()
+                        if not raw_content_check or raw_content_check == "{}":
+                             raise ValueError("LLM response parsed to empty chapters, possibly indicating an issue.")
+
+                    print(f"  - Stage 1: Received {len(chapters_result.get('chapters',[]))} chapter(s).")
+                    break # Success, exit retry loop
+                else:
+                    print("  - Stage 1: Skipping chapter generation due to empty prompt.")
+                    break # No prompt generated, don't retry
+
+            except Exception as e:
+                print(f"  - Stage 1: Attempt {attempt + 1}/{max_retries} failed for Chapters. Error: {e}")
+                if attempt + 1 == max_retries:
+                    print(f"  - Stage 1: Max retries reached for Chapters. Proceeding without chapters.")
+                    # chapters_result remains default empty
+                else:
+                    wait_time = initial_delay * (2 ** attempt) # Exponential backoff
+                    print(f"    - Retrying in {wait_time:.1f} seconds...")
+                    time.sleep(wait_time)
+
+
+        # --- Stage 2: Get Tags (Chunked Analysis) with Retry per Chunk ---
         print(f"  - Stage 2: Requesting Tags in {self.TAG_CHUNK_SECONDS}s chunks...")
         all_frames = segment.segment_frames_file_path
-        all_times = segment.segment_frame_time_intervals # Use the accurate times
+        all_times = segment.segment_frame_time_intervals
         tag_chunk_results = []
         segment_duration = segment.end_time - segment.start_time
-
         num_chunks = math.ceil(segment_duration / self.TAG_CHUNK_SECONDS) if self.TAG_CHUNK_SECONDS > 0 else 1
         print(f"    - Dividing into {num_chunks} chunks...")
 
+
         for i in range(num_chunks):
-             chunk_start = segment.start_time + (i * self.TAG_CHUNK_SECONDS)
-             chunk_end = min(segment.start_time + ((i + 1) * self.TAG_CHUNK_SECONDS), segment.end_time)
-             print(f"    - Processing Chunk {i+1}/{num_chunks} ({chunk_start:.3f}s - {chunk_end:.3f}s)")
+            chunk_start = segment.start_time + (i * self.TAG_CHUNK_SECONDS)
+            chunk_end = min(segment.start_time + ((i + 1) * self.TAG_CHUNK_SECONDS), segment.end_time)
+            print(f"    - Processing Chunk {i+1}/{num_chunks} ({chunk_start:.3f}s - {chunk_end:.3f}s)")
 
-             # Find frames/times within this chunk (inclusive start, exclusive end?) Let's do inclusive start/end for simplicity
-             # Add a small epsilon for float comparisons
-             epsilon = 0.001
-             chunk_indices = [
-                 idx for idx, t in enumerate(all_times)
-                 if chunk_start - epsilon <= t <= chunk_end + epsilon
-             ]
-
-             if not chunk_indices:
-                  print(f"      - No frames found for chunk {i+1}. Skipping.")
-                  continue
-
-             chunk_frames = [all_frames[idx] for idx in chunk_indices]
-             chunk_times = [all_times[idx] for idx in chunk_indices]
-             print(f"      - Found {len(chunk_frames)} frames for this chunk.")
+            epsilon = 0.001
+            chunk_indices = [idx for idx, t in enumerate(all_times) if chunk_start - epsilon <= t <= chunk_end + epsilon]
+            if not chunk_indices:
+                 print(f"      - No frames found for chunk {i+1}. Skipping.")
+                 continue
+            chunk_frames = [all_frames[idx] for idx in chunk_indices]
+            chunk_times = [all_times[idx] for idx in chunk_indices]
+            print(f"      - Found {len(chunk_frames)} frames for this chunk.")
 
 
-             tag_prompt = self._generate_segment_prompt(
-                 segment=segment,
-                 analysis_config=analysis_config,
-                 frames_subset=chunk_frames,
-                 times_subset=chunk_times,
-                 generate_chapters=False, # Ask ONLY for tags
-                 generate_tags=True,
-                 chunk_start_time=chunk_start, # Pass chunk boundaries
-                 chunk_end_time=chunk_end
-             )
+            # Retry loop for each chunk
+            parsed_chunk = None
+            for attempt in range(max_retries):
+                try:
+                    tag_prompt = self._generate_segment_prompt(
+                        segment=segment, analysis_config=analysis_config, frames_subset=chunk_frames,
+                        times_subset=chunk_times, generate_chapters=False, generate_tags=True,
+                        chunk_start_time=chunk_start, chunk_end_time=chunk_end
+                    )
 
-             if tag_prompt:
-                 try:
-                     tag_llm_response = self._call_llm(tag_prompt)
-                     parsed_chunk = self._parse_llm_json_response(
-                         tag_llm_response,
-                         expecting_chapters=False, # Parse only tags
-                         expecting_tags=True
-                     )
-                     tag_chunk_results.append(parsed_chunk)
-                     # Optional: Log count of tags found in chunk
-                     tags_found = sum(len(v) for k, v in parsed_chunk.get("global_tags", {}).items())
-                     print(f"      - Chunk {i+1} analysis complete. Found {tags_found} tags.")
+                    if tag_prompt:
+                        tag_llm_response = self._call_llm(tag_prompt)
+                        parsed_chunk = self._parse_llm_json_response(
+                            tag_llm_response, expecting_chapters=False, expecting_tags=True
+                        )
+                        # Check if parsing failed and returned default empty tags
+                        if not any(parsed_chunk.get("global_tags", {}).values()):
+                           # Check if the raw response was likely empty or problematic
+                           raw_content_check = tag_llm_response.choices[0].message.content.strip()
+                           if not raw_content_check or raw_content_check == "{}":
+                                raise ValueError("LLM response parsed to empty tags, possibly indicating an issue.")
 
-                 except Exception as e:
-                     print(f"Error getting tags for chunk {i+1} of segment {segment.segment_name}: {e}")
-                     # Continue to next chunk
+                        tags_found = sum(len(v) for k, v in parsed_chunk.get("global_tags", {}).items())
+                        print(f"      - Chunk {i+1} (Attempt {attempt+1}) analysis complete. Found {tags_found} tags.")
+                        break # Success, exit retry loop for this chunk
+                    else:
+                        print(f"      - Chunk {i+1}: Skipping tag generation due to empty prompt.")
+                        break # No prompt, exit retry loop
+
+                except Exception as e:
+                    print(f"      - Chunk {i+1}: Attempt {attempt + 1}/{max_retries} failed for Tags. Error: {e}")
+                    if attempt + 1 == max_retries:
+                        print(f"      - Chunk {i+1}: Max retries reached. Skipping tags for this chunk.")
+                        # parsed_chunk remains None or last failed attempt's default
+                    else:
+                        wait_time = initial_delay * (2 ** attempt) # Exponential backoff
+                        print(f"        - Retrying in {wait_time:.1f} seconds...")
+                        time.sleep(wait_time)
+
+                # Add the result (even if it's None or default empty after retries)
+                if parsed_chunk: # Only add if parsing didn't completely fail after retries
+                   tag_chunk_results.append(parsed_chunk)
 
 
         # --- Stage 3: Merge Tags ---
@@ -749,7 +818,7 @@ class VideoAnalyzer:
 
         # --- Stage 4: Combine ---
         final_combined_result = {
-            "chapters": chapters_result.get("chapters", []),
+            "chapters": chapters_result.get("chapters", []), # Use potentially empty chapters
             "global_tags": merged_global_tags
         }
 
@@ -809,75 +878,121 @@ class VideoAnalyzer:
         print(f"Analyzing segment {segment.segment_name} asynchronously...")
         stopwatch_segment = time.time()
 
-        # --- Stage 1: Get Chapters (Async) ---
+        # --- Retry Parameters ---
+        max_retries = 3
+        initial_delay = 1.0 # seconds
+
+        # --- Stage 1: Get Chapters (Async) with Retry ---
         print(f"  - Stage 1 (Async): Requesting Chapters...")
-        chapter_prompt = self._generate_segment_prompt(
-             segment=segment, analysis_config=analysis_config, generate_chapters=True, generate_tags=False
-        )
         chapters_result = {"chapters": []}
-        if chapter_prompt:
+        for attempt in range(max_retries):
             try:
-                chapter_llm_response = await self._call_llm_async(chapter_prompt)
-                chapters_result = self._parse_llm_json_response(chapter_llm_response, expecting_chapters=True, expecting_tags=False)
-                print(f"  - Stage 1 (Async): Received {len(chapters_result.get('chapters',[]))} chapter(s).")
+                chapter_prompt = self._generate_segment_prompt(
+                    segment=segment, analysis_config=analysis_config, generate_chapters=True, generate_tags=False
+                )
+                if chapter_prompt:
+                    chapter_llm_response = await self._call_llm_async(chapter_prompt)
+                    chapters_result = self._parse_llm_json_response(
+                         chapter_llm_response, expecting_chapters=True, expecting_tags=False
+                    )
+                    # Add check for failed parsing returning default
+                    if not chapters_result.get("chapters"):
+                        raw_content_check = chapter_llm_response.choices[0].message.content.strip()
+                        if not raw_content_check or raw_content_check == "{}":
+                             raise ValueError("LLM response parsed to empty chapters, possibly indicating an issue.")
+
+                    print(f"  - Stage 1 (Async): Received {len(chapters_result.get('chapters',[]))} chapter(s).")
+                    break # Success
+                else:
+                    print("  - Stage 1 (Async): Skipping chapter generation due to empty prompt.")
+                    break # No prompt
+
             except Exception as e:
-                print(f"Error getting chapters async for segment {segment.segment_name}: {e}")
+                print(f"  - Stage 1 (Async): Attempt {attempt + 1}/{max_retries} failed for Chapters. Error: {e}")
+                if attempt + 1 == max_retries:
+                    print(f"  - Stage 1 (Async): Max retries reached for Chapters. Proceeding without chapters.")
+                else:
+                    wait_time = initial_delay * (2 ** attempt)
+                    print(f"    - Retrying in {wait_time:.1f} seconds...")
+                    await asyncio.sleep(wait_time) # Use asyncio.sleep for async
 
-
-        # --- Stage 2: Get Tags (Chunked Async Calls) ---
+        # --- Stage 2: Get Tags (Chunked Async Calls) with Retry per Chunk ---
         print(f"  - Stage 2 (Async): Requesting Tags in {self.TAG_CHUNK_SECONDS}s chunks...")
         all_frames = segment.segment_frames_file_path
         all_times = segment.segment_frame_time_intervals
-        tag_chunk_tasks = []
+        tag_chunk_tasks = [] # Will store tasks that call a retry-wrapper
         segment_duration = segment.end_time - segment.start_time
         num_chunks = math.ceil(segment_duration / self.TAG_CHUNK_SECONDS) if self.TAG_CHUNK_SECONDS > 0 else 1
         print(f"    - Dividing into {num_chunks} chunks...")
 
+        # --- Define an async retry wrapper for tag chunk calls ---
+        async def call_and_parse_chunk_with_retry(chunk_idx, chunk_start, chunk_end, chunk_frames, chunk_times):
+            print(f"    - Preparing Chunk {chunk_idx+1}/{num_chunks} ({chunk_start:.3f}s - {chunk_end:.3f}s)")
+            for attempt in range(max_retries):
+                try:
+                    tag_prompt = self._generate_segment_prompt(
+                         segment=segment, analysis_config=analysis_config, frames_subset=chunk_frames,
+                         times_subset=chunk_times, generate_chapters=False, generate_tags=True,
+                         chunk_start_time=chunk_start, chunk_end_time=chunk_end
+                    )
+                    if not tag_prompt:
+                         print(f"      - Chunk {chunk_idx+1}: Skipping tag generation due to empty prompt.")
+                         return None # No prompt, return None
+
+                    tag_llm_response = await self._call_llm_async(tag_prompt)
+                    parsed_chunk = self._parse_llm_json_response(
+                         tag_llm_response, expecting_chapters=False, expecting_tags=True
+                    )
+                    # Check for failed parsing returning default
+                    if not any(parsed_chunk.get("global_tags", {}).values()):
+                        raw_content_check = tag_llm_response.choices[0].message.content.strip()
+                        if not raw_content_check or raw_content_check == "{}":
+                            raise ValueError("LLM response parsed to empty tags, possibly indicating an issue.")
+
+                    tags_found = sum(len(v) for k, v in parsed_chunk.get("global_tags", {}).items())
+                    print(f"      - Chunk {chunk_idx+1} (Attempt {attempt+1}) analysis complete. Found {tags_found} tags.")
+                    return parsed_chunk # Success
+
+                except Exception as e:
+                     print(f"      - Chunk {chunk_idx+1}: Attempt {attempt + 1}/{max_retries} failed for Tags. Error: {e}")
+                     if attempt + 1 == max_retries:
+                          print(f"      - Chunk {chunk_idx+1}: Max retries reached. Skipping tags for this chunk.")
+                          return None # Failed after retries, return None
+                     else:
+                          wait_time = initial_delay * (2 ** attempt)
+                          print(f"        - Retrying in {wait_time:.1f} seconds...")
+                          await asyncio.sleep(wait_time)
+            return None # Should not be reached if loop completes, but good practice
+
+        # --- Create tasks for the retry wrapper ---
         for i in range(num_chunks):
+            # ... (setup code for chunk: chunk_start, chunk_end, chunk_indices, chunk_frames, chunk_times) ...
             chunk_start = segment.start_time + (i * self.TAG_CHUNK_SECONDS)
             chunk_end = min(segment.start_time + ((i + 1) * self.TAG_CHUNK_SECONDS), segment.end_time)
-
             epsilon = 0.001
             chunk_indices = [idx for idx, t in enumerate(all_times) if chunk_start - epsilon <= t <= chunk_end + epsilon]
             if not chunk_indices: continue
-
             chunk_frames = [all_frames[idx] for idx in chunk_indices]
             chunk_times = [all_times[idx] for idx in chunk_indices]
+            print(f"      - Creating task for Chunk {i+1} ({len(chunk_frames)} frames)")
 
-            tag_prompt = self._generate_segment_prompt(
-                 segment=segment, analysis_config=analysis_config, frames_subset=chunk_frames,
-                 times_subset=chunk_times, generate_chapters=False, generate_tags=True,
-                 chunk_start_time=chunk_start, chunk_end_time=chunk_end
+            # Create a task using the retry wrapper
+            task = asyncio.create_task(
+                call_and_parse_chunk_with_retry(i, chunk_start, chunk_end, chunk_frames, chunk_times),
+                name=f"RetryChunk_{i+1}"
             )
-            if tag_prompt:
-                 # Create a task for each chunk's LLM call
-                 task = asyncio.create_task(self._call_llm_async(tag_prompt), name=f"Chunk_{i+1}")
-                 tag_chunk_tasks.append(task)
+            tag_chunk_tasks.append(task)
+
 
         # Gather results from all chunk tasks
-        tag_llm_responses = []
+        tag_chunk_results_raw = []
         if tag_chunk_tasks:
-             print(f"    - Awaiting {len(tag_chunk_tasks)} tag chunk analyses...")
-             # Use return_exceptions=True to handle potential errors in individual calls
-             tag_llm_responses = await asyncio.gather(*tag_chunk_tasks, return_exceptions=True)
+             print(f"    - Awaiting {len(tag_chunk_tasks)} tag chunk analyses (with retries)...")
+             tag_chunk_results_raw = await asyncio.gather(*tag_chunk_tasks) # No return_exceptions needed here as wrapper handles it
              print(f"    - Tag chunk analyses complete.")
 
-        # Process responses
-        tag_chunk_results = []
-        for i, response_or_exc in enumerate(tag_llm_responses):
-             if isinstance(response_or_exc, Exception):
-                  print(f"Error in async tag chunk {i+1} for segment {segment.segment_name}: {response_or_exc}")
-             elif response_or_exc: # Check if response is not None
-                  try:
-                       parsed_chunk = self._parse_llm_json_response(
-                            response_or_exc, expecting_chapters=False, expecting_tags=True
-                       )
-                       tag_chunk_results.append(parsed_chunk)
-                  except Exception as parse_exc:
-                       print(f"Error parsing async tag chunk {i+1} response: {parse_exc}")
-             else:
-                  print(f"Warning: Received None response for async tag chunk {i+1}")
-
+        # Process results (filter out None results from failed chunks)
+        tag_chunk_results = [result for result in tag_chunk_results_raw if result is not None]
 
         # --- Stage 3: Merge Tags ---
         print(f"  - Stage 3 (Async): Merging tags from {len(tag_chunk_results)} successful chunks...")
@@ -887,7 +1002,7 @@ class VideoAnalyzer:
 
         # --- Stage 4: Combine ---
         final_combined_result = {
-            "chapters": chapters_result.get("chapters", []),
+            "chapters": chapters_result.get("chapters", []), # Use potentially empty chapters
             "global_tags": merged_global_tags
         }
 

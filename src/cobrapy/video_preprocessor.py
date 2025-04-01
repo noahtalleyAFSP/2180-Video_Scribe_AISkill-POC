@@ -3,17 +3,18 @@ import time
 import math
 import numpy as np
 import psutil
-from typing import Union, Type
+from typing import Union, Type, Optional
 
 import concurrent.futures
+import requests
+from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
+from datetime import datetime, timedelta
 
 from .models.video import VideoManifest, Segment
 from .models.environment import CobraEnvironment
 from .cobra_utils import (
     get_elapsed_time,
-    generate_transcript,
     parse_transcript,
-    get_elapsed_time,
     write_video_manifest,
     extract_base_audio,
     segment_and_extract,
@@ -21,6 +22,7 @@ from .cobra_utils import (
     parallelize_transcription,
     prepare_outputs_directory,
 )
+from .cobra_utils import generate_batch_transcript
 
 
 class VideoPreProcessor:
@@ -111,15 +113,23 @@ class VideoPreProcessor:
             self.manifest.source_video.audio_found
             and self.manifest.processing_params.generate_transcript_flag
         ):
-            print(f"({get_elapsed_time(start_time)}s) Extracting audio...")
-            self._extract_audio(max_workers)
-        
+            print(f"({get_elapsed_time(start_time)}s) Extracting audio and initiating Batch Transcription...")
+            try:
+                # _extract_audio_and_transcribe will now handle upload and wait for Batch API
+                self._extract_audio_and_transcribe(max_workers)
+                if not self.manifest.audio_transcription:
+                     print(f"({get_elapsed_time(start_time)}s) Warning: Batch transcription did not produce results.")
+                else:
+                     print(f"({get_elapsed_time(start_time)}s) Batch transcription completed.")
+            except Exception as e:
+                print(f"({get_elapsed_time(start_time)}s) ERROR during audio extraction or transcription: {e}")
+                # Decide: stop or continue without transcription?
+                print(f"({get_elapsed_time(start_time)}s) Warning: Continuing preprocessing without transcription.")
+                self.manifest.processing_params.generate_transcript_flag = False # Ensure flag is off
+
         # Generate the segments based on speech or time
-        print(f"({get_elapsed_time(start_time)}s) Generating segments...")
-        if use_speech_based_segments and self.manifest.audio_transcription:
-            self._generate_speech_based_segments()
-        else:
-            self._generate_segments()
+        print(f"({get_elapsed_time(start_time)}s) Generating time-based segments...")
+        self._generate_segments()
         
         # Configure thread pool
         if max_workers is None:
@@ -131,7 +141,7 @@ class VideoPreProcessor:
             max_workers = max_workers
 
         # Process the segments
-        print(f"({get_elapsed_time(start_time)}s) Processing segments...")
+        print(f"({get_elapsed_time(start_time)}s) Processing segments (extracting frames)...")
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=max_workers
         ) as executor:
@@ -141,16 +151,29 @@ class VideoPreProcessor:
                 # Skip segments that have already been processed
                 if segment.processed:
                     continue
+                # Pass the full transcription object if available for parsing segment text
+                segment_transcription_text = None
+                if self.manifest.audio_transcription:
+                     # Parse relevant text for this segment's time window
+                     segment_transcription_text = parse_transcript(
+                          self.manifest.audio_transcription, # Pass the Batch API result dict
+                          segment.start_time,
+                          segment.end_time
+                     )
+
                 futures.append(
-                    executor.submit(self._preprocess_segment,
-                                    segment=segment, index=i)
+                     executor.submit(self._preprocess_segment,
+                                      segment=segment,
+                                      index=i,
+                                      transcription_text=segment_transcription_text # Pass parsed text
+                                      )
                 )
 
             # As tasks are completed, update the video manifest
             for future in concurrent.futures.as_completed(futures):
                 i, updated_segment, res = future.result()
                 self.manifest.segments[i] = updated_segment
-                self.manifest.segments[i].processed = res
+                # No need to set .processed=res here, _preprocess_segment should handle state
 
         print(f"({get_elapsed_time(start_time)}s) All segments pre-processed")
 
@@ -236,243 +259,141 @@ class VideoPreProcessor:
                 )
             )
 
-    def _preprocess_segment(self, segment: Segment, index: int):
+    def _preprocess_segment(self, segment: Segment, index: int, transcription_text: Optional[str]):
         stop_watch_time = time.time()
-
-        create_transcript_flag = (
-            self.manifest.processing_params.generate_transcript_flag
-        )
-
         print(
-            f"**Segment {index} {segment.segment_name} - beginning processing. Transcripts: {create_transcript_flag}"
+            f"**Segment {index} {segment.segment_name} - beginning frame extraction."
         )
-
         try:
             input_video_path = self.manifest.source_video.path
             segment_path = segment.segment_folder_path
             start_time = segment.start_time
             end_time = segment.end_time
-            fps = self.manifest.processing_params.fps  # Desired analysis FPS
+            fps = self.manifest.processing_params.fps
 
             frames_dir = os.path.join(segment_path, "frames")
             os.makedirs(frames_dir, exist_ok=True)
             segment_video_path = os.path.join(segment_path, "segment.mp4")
-            segment_and_extract(
-                start_time, end_time, input_video_path, segment_path, frames_dir, fps
-            )
+            segment_and_extract(start_time, end_time, input_video_path, segment_path, frames_dir, fps)
 
-            # Calculate frame times based on actual extracted frames
             frame_files = sorted(os.listdir(frames_dir))
             number_of_frames = len(frame_files)
-            
-            # Recalculate intervals based on actual frame count
+
             segment_duration = end_time - start_time
             frame_times = np.linspace(start_time, end_time, number_of_frames, endpoint=False)
-            frame_times = [round(t, 2) for t in frame_times]
-            
+            frame_times = [round(t, 3) for t in frame_times] # Keep 3 decimals for consistency
+
             segment.segment_frame_time_intervals = frame_times
             segment.segment_frames_file_path = []
-            
-            # Rename frames with matching intervals
+
             for i, (frame_file, frame_time) in enumerate(zip(frame_files, frame_times)):
                 old_frame_path = os.path.join(frames_dir, frame_file)
-                new_frame_filename = f"frame_{i}_{frame_time}s.jpg"
+                # Use 3 decimal places in filename
+                new_frame_filename = f"frame_{i}_{frame_time:.3f}s.jpg"
                 new_frame_path = os.path.join(frames_dir, new_frame_filename)
                 os.rename(old_frame_path, new_frame_path)
                 segment.segment_frames_file_path.append(new_frame_path)
 
-            # Remove the temporary segment video file
             os.remove(segment_video_path)
+            print(f"**Segment {index} {segment.segment_name} - extracted {number_of_frames} frames in {get_elapsed_time(stop_watch_time)}s")
 
-            print(
-                f"**Segment {index} {segment.segment_name} - extracted and renamed frames in {get_elapsed_time(stop_watch_time)}"
-            )
+            # Set the pre-parsed transcription text
+            segment.transcription = transcription_text if transcription_text else "No transcription for this segment."
 
-            # Process transcription if needed
-            if create_transcript_flag and not segment.transcription:
-                # Only extract transcription if it wasn't already provided
-                # (which happens with speech-based segments)
-                transcript = self.manifest.audio_transcription
-                segment.transcription = parse_transcript(
-                    transcript, start_time, end_time
-                )
-
-            # Update segment frame count
             segment.number_of_frames = len(segment.segment_frames_file_path)
+            segment.processed = True # Mark as processed (frames extracted)
+            return index, segment, True # Return success status
 
-            return index, segment, True
         except Exception as e:
-            print(f"Error processing segment {segment.segment_name}: {e}")
-            return index, segment, False
+            print(f"Error processing segment {segment.segment_name} frames: {e}")
+            segment.processed = False # Mark as failed
+            return index, segment, False # Return failure status
 
-    # Define the audio output path
-    def _extract_audio(self, max_workers: int):
-        audio_path = os.path.join(
+    # Rename to reflect combined action
+    def _extract_audio_and_transcribe(self, max_workers: int):
+        """Extracts audio, uploads to blob, runs Batch Transcription, and waits for results."""
+        start_t = time.time()
+        base_audio_name = f"{os.path.splitext(self.manifest.name)[0]}.wav"
+        local_audio_path = os.path.join(
             self.manifest.processing_params.output_directory,
-            f"{os.path.splitext(self.manifest.name)[0]}.mp3",
+            base_audio_name
         )
 
-        # Use FFmpeg to extract audio
-        extract_base_audio(self.manifest.source_video.path, audio_path)
+        # --- 1. Extract Full Audio Locally (calls the updated extract_base_audio) ---
+        print(f"({get_elapsed_time(start_t)}s) Extracting full audio to {local_audio_path} (Format: WAV)...")
+        try:
+             extract_base_audio(self.manifest.source_video.path, local_audio_path)
+             self.manifest.source_audio.path = local_audio_path
+             self.manifest.source_audio.file_size_mb = os.path.getsize(local_audio_path) / (1024 * 1024)
+             print(f"({get_elapsed_time(start_t)}s) Audio extracted ({self.manifest.source_audio.file_size_mb:.2f} MB).")
+        except Exception as e:
+             print(f"({get_elapsed_time(start_t)}s) Failed to extract audio: {e}")
+             raise # Re-raise exception to stop processing
 
-        audio_file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        # --- 2. Upload Audio to Azure Blob Storage ---
+        print(f"({get_elapsed_time(start_t)}s) Uploading audio to Azure Blob Storage...")
+        blob_service_client = None
+        blob_config = self.env.blob_storage
+        blob_name = f"audio_uploads/{base_audio_name}"
 
-        # Process audio based on file size
-        if audio_file_size_mb <= 25.0:
-            # For small audio files, process directly
-            self.manifest.source_audio.path = audio_path
-            self.manifest.source_audio.file_size_mb = audio_file_size_mb
-            transcript = generate_transcript(
-                audio_file_path=audio_path, env=self.env)
-            self.manifest.audio_transcription = transcript
-        else:
-            # For large audio files, split into chunks and process in parallel
-            print(
-                f"Audio file size is {audio_file_size_mb:.2f}MB; splitting into chunks..."
-            )
-
-            # Calculate number of chunks
-            splitting_value = int(audio_file_size_mb / 20)
-            duration = float(self.manifest.source_video.duration)
-            chunk_size = duration / splitting_value
-
-            # Prepare arguments for parallel extraction
-            extract_args_list = []
-            for counter in range(splitting_value):
-                start = chunk_size * counter
-                end = min(chunk_size * (counter + 1), duration)
-                audio_chunk_path = os.path.join(
-                    self.manifest.processing_params.output_directory,
-                    f"{os.path.splitext(self.manifest.name)[0]}_{counter + 1}.mp3",
-                )
-                extract_args_list.append(
-                    (self.manifest.source_video.path, start, end, audio_chunk_path)
-                )
-            # Parallelize audio chunk extraction
-            extracted_chunks = parallelize_audio(
-                extract_args_list, max_workers)
-
-            # Prepare arguments for parallel transcription
-            process_args_list = [
-                (chunk_path, start) for chunk_path, start in extracted_chunks
-            ]
-            combined_transcript = parallelize_transcription(process_args_list)
-
-            self.manifest.source_audio.path = audio_path
-            self.manifest.source_audio.file_size_mb = audio_file_size_mb
-            self.manifest.audio_transcription = combined_transcript
-
-    def _generate_speech_based_segments(self):
-        """Generate segments based on natural speech breaks in the transcript."""
-        print("Generating speech-based segments...")
-        
-        # Check if we have a transcript
-        if not hasattr(self.manifest, 'audio_transcription') or not self.manifest.audio_transcription:
-            print("No transcription available, falling back to time-based segments")
-            return self._generate_segments()
-        
-        # Extract speech segments from transcript
-        segments_data = self.manifest.audio_transcription.get("segments", [])
-        
-        if not segments_data:
-            print("No speech segments found, falling back to time-based segments")
-            return self._generate_segments()
-        
-        print(f"Found {len(segments_data)} speech segments")
-        
-        # Group speech segments into logical groups
-        grouped_segments = []
-        current_group = []
-        current_duration = 0
-        max_duration = min(60, self.manifest.processing_params.segment_length * 3)  # Cap at 60s or 3x segment_length
-        min_duration = max(5, self.manifest.processing_params.segment_length / 2)    # Min 5s or half segment_length
-        
-        # Sort segments by start time
-        sorted_segments = sorted(segments_data, key=lambda x: x.get("offset", 0))
-        
-        for speech in sorted_segments:
-            speech_start = speech.get("offset", 0)
-            speech_duration = speech.get("duration", 0)
-            
-            # If this would make the segment too long, start a new one
-            if current_duration + speech_duration > max_duration and current_duration >= min_duration:
-                if current_group:
-                    grouped_segments.append(current_group)
-                current_group = [speech]
-                current_duration = speech_duration
+        try:
+            if blob_config.connection_string:
+                 blob_service_client = BlobServiceClient.from_connection_string(
+                      blob_config.connection_string.get_secret_value()
+                 )
+            elif blob_config.account_name and blob_config.sas_token:
+                 account_url = f"https://{blob_config.account_name}.blob.core.windows.net"
+                 blob_service_client = BlobServiceClient(
+                      account_url=account_url,
+                      credential=blob_config.sas_token.get_secret_value()
+                 )
             else:
-                current_group.append(speech)
-                current_duration += speech_duration
-                
-            # If there's a significant pause after this speech (> 2 seconds)
-            # and we have enough content, start a new segment
-            if len(sorted_segments) > 1:
-                idx = sorted_segments.index(speech)
-                if idx < len(sorted_segments) - 1:
-                    next_speech = sorted_segments[idx + 1]
-                    next_start = next_speech.get("offset", 0)
-                    pause_duration = next_start - (speech_start + speech_duration)
-                    
-                    if pause_duration > 2 and current_duration >= min_duration:
-                        grouped_segments.append(current_group)
-                        current_group = []
-                        current_duration = 0
-        
-        # Add the last group if it's not empty
-        if current_group:
-            grouped_segments.append(current_group)
-        
-        # Create segments from the groups
-        segments = []
-        for i, group in enumerate(grouped_segments):
-            if not group:
-                continue
-            
-            # Calculate start and end times
-            start_time = min(speech.get("offset", 0) for speech in group)
-            end_time = max(speech.get("offset", 0) + speech.get("duration", 0) for speech in group)
-            
-            # Add small buffer at beginning and end
-            buffer = 0.5  # half second buffer
-            start_time = max(0, start_time - buffer)
-            end_time = min(self.manifest.source_video.duration, end_time + buffer)
-            
-            segment_duration = end_time - start_time
-            
-            # Create and set up the segment
-            segment = Segment()
-            segment.segment_name = f"segment_{i+1:04d}"
-            segment.segment_folder_path = os.path.join(
-                self.manifest.processing_params.output_directory, segment.segment_name
+                 raise ValueError("Missing Blob Storage credentials (Connection String or SAS Token).")
+
+            blob_client = blob_service_client.get_blob_client(
+                 container=blob_config.container_name,
+                 blob=blob_name
             )
-            segment.start_time = start_time
-            segment.end_time = end_time
-            segment.segment_duration = segment_duration
-            
-            # Create segment folder
-            os.makedirs(segment.segment_folder_path, exist_ok=True)
-            
-            # Collect transcription for this segment
-            segment_text = " ".join(speech.get("text", "") for speech in group)
-            segment.transcription = segment_text
-            
-            # Mark the segment as speech based
-            segment.is_speech_based = True
-            
-            segments.append(segment)
-        
-        # If no valid groups were created, fall back to time-based segments
-        if not segments:
-            print("Could not create valid speech-based segments, falling back to time-based segments")
-            return self._generate_segments()
-        
-        print(f"Created {len(segments)} speech-based segments")
-        
-        # Update the manifest with the new segments
-        self.manifest.segments = segments
-        self.manifest.segment_metadata.num_segments = len(segments)
-        self.manifest.segment_metadata.effective_duration = sum(
-            segment.segment_duration for segment in segments
-        )
-        
-        return segments
+
+            with open(local_audio_path, "rb") as data:
+                 blob_client.upload_blob(data, overwrite=True)
+            print(f"({get_elapsed_time(start_t)}s) Audio uploaded to {blob_config.container_name}/{blob_name}")
+
+            # --- 3. Generate SAS Token for the uploaded blob ---
+            print(f"({get_elapsed_time(start_t)}s) Generating SAS token for transcription...")
+            sas_token = generate_blob_sas(
+                 account_name=blob_config.account_name,
+                 container_name=blob_config.container_name,
+                 blob_name=blob_name,
+                 account_key=blob_service_client.credential.account_key if hasattr(blob_service_client.credential, 'account_key') else None,
+                 user_delegation_key=None,
+                 permission=BlobSasPermissions(read=True),
+                 expiry=datetime.utcnow() + timedelta(hours=24)
+            )
+            blob_sas_url = f"{blob_client.url}?{sas_token}"
+            print(f"({get_elapsed_time(start_t)}s) SAS URL generated.")
+
+        except Exception as e:
+             print(f"({get_elapsed_time(start_t)}s) Failed to upload audio or generate SAS: {e}")
+             raise
+
+        # --- 4. Call Batch Transcription (and wait) ---
+        print(f"({get_elapsed_time(start_t)}s) Submitting Batch Transcription job...")
+        try:
+             transcript_result = generate_batch_transcript(
+                  audio_blob_sas_url=blob_sas_url,
+                  env=self.env,
+                  candidate_locales=["en-US"]
+             )
+             self.manifest.audio_transcription = transcript_result
+             print(f"({get_elapsed_time(start_t)}s) Batch transcription job finished.")
+        except Exception as e:
+             print(f"({get_elapsed_time(start_t)}s) Batch transcription call failed: {e}")
+             self.manifest.audio_transcription = None
+
+        # --- 5. Optional: Clean up local audio ---
+        try:
+            print(f"({get_elapsed_time(start_t)}s) Removing local audio file: {local_audio_path}")
+            os.remove(local_audio_path)
+        except Exception as e:
+            print(f"({get_elapsed_time(start_t)}s) Warning: Could not remove local audio file {local_audio_path}: {e}")
