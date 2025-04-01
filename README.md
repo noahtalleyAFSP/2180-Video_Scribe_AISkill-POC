@@ -1,6 +1,6 @@
-# Cobra Video Analysis Tool
+# Video Scribe  Analysis Tool
 
-This tool analyzes videos using Large Language Models (like GPT-4 Vision) to provide structured descriptions of content, including chapters, persons, actions, and objects, with a focus on generating accurate timestamps.
+This tool analyzes videos using Large Language Models (like GPT-4o Vision) to provide structured descriptions of content, including chapters, persons, actions, and objects, with a focus on generating accurate timestamps.
 
 ## Features
 
@@ -38,7 +38,7 @@ API credentials and endpoints are required. You can configure them using:
     *   `AZURE_OPENAI_GPT_VISION_API_VERSION`
     *   `AZURE_OPENAI_GPT_VISION_DEPLOYMENT`
     *   (Optional) `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` (for transcription)
-    *   (Optional) `AZURE_FACE_ENDPOINT`, `AZURE_FACE_API_KEY` (for face recognition - *Currently experimental*)
+    *   (Optional) `AZURE_FACE_ENDPOINT`, `AZURE_FACE_API_KEY` (for face recognition)
 2.  **`.env` File:** Create a `.env` file in the project root or specify a path using `--env-file`.
 3.  **Command Line Arguments:** Override environment settings using arguments like `--api-key`, `--api-base`, etc.
 
@@ -47,13 +47,7 @@ API credentials and endpoints are required. You can configure them using:
 Basic analysis using time-based segments:
 
 ```bash
-python analyze_video.py my_video.mp4 --output-dir ./my_video_output
-```
-
-Analysis using speech-based segmentation (requires audio and transcription):
-
-```bash
-python analyze_video.py my_video.mp4 --output-dir ./my_video_output --use-speech-based-segments
+python analyze_video.py my_video.mp4 ./my_video_output
 ```
 
 Analysis with custom lists and asynchronous processing:
