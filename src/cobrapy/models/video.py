@@ -36,6 +36,8 @@ class SourceVideoMetadata(BaseModel):
     audio_found: Optional[bool] = False
     audio_duration: Optional[float] = None
     audio_fps: Optional[int] = None
+    format_name: Optional[str] = None
+    duration_iso: Optional[str] = None
 
 
 class SourceAudioMetadata(BaseModel):

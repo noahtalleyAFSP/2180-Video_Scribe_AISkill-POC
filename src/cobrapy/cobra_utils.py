@@ -5,7 +5,7 @@ from .models.video import VideoManifest
 from .models.environment import CobraEnvironment
 import subprocess
 import concurrent.futures
-from shutil import rmtree
+from shutil import rmtree, Error as ShutilError
 import azure.cognitiveservices.speech as speechsdk
 from azure.ai.vision.face import FaceAdministrationClient, FaceClient
 from azure.ai.vision.face.models import FaceDetectionModel, FaceRecognitionModel, QualityForRecognition
@@ -15,6 +15,7 @@ import logging
 import requests
 from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
 from datetime import datetime, timedelta
+import math # Add math import for duration conversion
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +370,10 @@ def get_file_info(video_path):
             file_info["format"] = ffprobe_info["format"]
             if "duration" in ffprobe_info["format"]:
                 file_info["duration"] = float(ffprobe_info["format"]["duration"])
+            # --- ADDED: Extract format name ---
+            if "format_name" in ffprobe_info["format"]:
+                 file_info["format_name"] = ffprobe_info["format"]["format_name"]
+            # --- END ADDED ---
         
         # Set audio_found flag based on our checks
         file_info["audio_found"] = has_audio
@@ -540,21 +545,36 @@ def process_chunk(args):
 
 def validate_video_manifest(video_manifest: Union[str, VideoManifest]) -> VideoManifest:
     if isinstance(video_manifest, str):
-        # check to see if the path is valid
-        if os.path.isfile(video_manifest):
-            with open(video_manifest, "r", encoding="utf-8") as f:
-                video_manifest = VideoManifest.model_validate_json(
-                    json_data=f.read())
-            return video_manifest
-        else:
+        # Check if the path is valid
+        if not os.path.isfile(video_manifest):
             raise FileNotFoundError(
-                f"video_manifest file not found in {video_manifest}"
+                f"Input file not found: {video_manifest}"
             )
+        
+        # Check if the file is a JSON manifest
+        if not video_manifest.lower().endswith('.json'):
+            raise ValueError(
+                f"Expected a path to a JSON manifest file or a VideoManifest object, but received a path to a non-JSON file: {video_manifest}. "
+                f"VideoAnalyzer should be initialized directly from a VideoManifest object or a path to its JSON file."
+            )
+
+        # If it's a JSON file, read and validate it
+        try:
+            with open(video_manifest, "r", encoding="utf-8") as f:
+                manifest_obj = VideoManifest.model_validate_json(
+                    json_data=f.read()
+                )
+            return manifest_obj
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Error decoding JSON from manifest file {video_manifest}: {e}")
+        except Exception as e:
+            raise IOError(f"Error reading manifest file {video_manifest}: {e}")
+
     elif isinstance(video_manifest, VideoManifest):
         return video_manifest
     else:
         raise ValueError(
-            "video_manifest must be a string or a VideoManifest object")
+            "video_manifest must be a string path to a JSON file or a VideoManifest object")
 
 
 def get_elapsed_time(start_time):
@@ -600,17 +620,36 @@ def prepare_outputs_directory(
         asset_directory_path = output_directory
 
     # Create output directory if it doesn't exist. If it does exist, check if we should overwrite it
-    if not os.path.exists(asset_directory_path):
-        os.makedirs(asset_directory_path)
-    else:
+    if os.path.exists(asset_directory_path):
         if overwrite_output is True:
-            # delete the directory and all of its contents
-            rmtree(asset_directory_path)
+            print(f"Output directory {asset_directory_path} exists. Overwriting...")
+            attempts = 3
+            delay = 1 # seconds
+            for i in range(attempts):
+                try:
+                    rmtree(asset_directory_path)
+                    print("Existing directory removed successfully.")
+                    break # Exit loop if successful
+                except (OSError, ShutilError) as e:
+                    print(f"Warning: Attempt {i+1}/{attempts} failed to remove directory: {e}")
+                    if i < attempts - 1:
+                        print(f"Retrying in {delay} second(s)...")
+                        time.sleep(delay)
+                    else:
+                        print(f"ERROR: Failed to remove existing directory {asset_directory_path} after {attempts} attempts.")
+                        raise # Re-raise the last exception if all attempts fail
+            # Recreate the directory after successful removal
             os.makedirs(asset_directory_path)
         else:
+            # Directory exists but overwrite is False
             raise FileExistsError(
                 f"Directory already exists: {asset_directory_path}. If you would like to overwrite it, set overwrite_output=True"
             )
+    else:
+        # Directory doesn't exist, create it
+        os.makedirs(asset_directory_path)
+        print(f"Created output directory: {asset_directory_path}")
+
     return asset_directory_path
 
 
@@ -807,3 +846,200 @@ def process_frame_with_faces(image_path: str, env: CobraEnvironment, person_grou
             "faces": [],
             "identified_people": []
         }
+
+
+def upload_blob(
+    local_file_path: str,
+    blob_name: str,
+    env: CobraEnvironment,
+    overwrite: bool = True,
+    read_permission_hours: int = 48 # Default SAS expiry for read access
+) -> Optional[str]:
+    """
+    Uploads a local file to Azure Blob Storage and returns a SAS URL.
+
+    Args:
+        local_file_path: Path to the local file to upload.
+        blob_name: Name for the blob in Azure Storage.
+        env: CobraEnvironment containing Blob Storage config.
+        overwrite: Whether to overwrite the blob if it exists.
+        read_permission_hours: Duration in hours for which the generated SAS token is valid for reading.
+
+    Returns:
+        A SAS URL string for the uploaded blob with read permissions, or None on failure.
+    """
+    if not env.blob_storage or not env.blob_storage.account_name or not env.blob_storage.container_name:
+        logger.error("Blob storage account/container name not configured in environment.")
+        return None
+
+    if not env.blob_storage.connection_string and not env.blob_storage.sas_token:
+         logger.error("Blob storage connection string or SAS token not configured in environment.")
+         return None
+
+    blob_service_client = None
+    try:
+        if env.blob_storage.connection_string:
+            connect_str = env.blob_storage.connection_string.get_secret_value()
+            blob_service_client = BlobServiceClient.from_connection_string(connect_str)
+            logger.info(f"Connected to Blob Storage using connection string.")
+        elif env.blob_storage.sas_token:
+            account_url = f"https://{env.blob_storage.account_name}.blob.core.windows.net"
+            sas_token_str = env.blob_storage.sas_token.get_secret_value()
+            blob_service_client = BlobServiceClient(account_url=account_url, credential=sas_token_str)
+            logger.info(f"Connected to Blob Storage using SAS token.")
+        else:
+            # This case should be caught by the initial check, but belt-and-suspenders
+            logger.error("No valid authentication method found for Blob Storage.")
+            return None
+
+        blob_client = blob_service_client.get_blob_client(
+            container=env.blob_storage.container_name,
+            blob=blob_name
+        )
+
+        logger.info(f"Uploading {local_file_path} to blob: {env.blob_storage.container_name}/{blob_name}")
+        with open(local_file_path, "rb") as data:
+            blob_client.upload_blob(data, overwrite=overwrite)
+        logger.info("Upload successful.")
+
+        # Generate SAS token with read permission
+        sas_token = generate_blob_sas(
+            account_name=blob_client.account_name,
+            container_name=blob_client.container_name,
+            blob_name=blob_client.blob_name,
+            account_key=blob_service_client.credential.account_key if hasattr(blob_service_client.credential, 'account_key') else None, # Needed if using account key via conn string
+            user_delegation_key=None, # Not typically used for service SAS
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.utcnow() + timedelta(hours=read_permission_hours),
+            # start=datetime.utcnow() - timedelta(minutes=5) # Optional: Add start time
+        )
+
+        sas_url = f"{blob_client.url}?{sas_token}"
+        logger.info(f"Generated SAS URL (valid for {read_permission_hours} hours).")
+        return sas_url
+
+    except Exception as e:
+        logger.error(f"Failed to upload blob or generate SAS URL: {e}")
+        return None
+
+
+def create_basic_manifest_from_video(video_path: str) -> VideoManifest:
+    """Creates a basic VideoManifest object from a video file path, populating source info."""
+    manifest = VideoManifest()
+
+    # Check that the video file exists
+    if not os.path.isfile(video_path):
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+    else:
+        manifest.name = os.path.basename(video_path)
+        manifest.source_video.path = os.path.abspath(video_path)
+
+    # Get video metadata
+    file_metadata = get_file_info(video_path)
+    if file_metadata is not None:
+        duration_sec = file_metadata.get("duration", None) # Get duration early
+        duration_iso = seconds_to_iso8601_duration(duration_sec) # Calculate ISO duration
+
+        manifest_source = {
+            "path": video_path,
+            "video_found": False,
+            "size": [],
+            "rotation": 0,
+            "fps": 0,
+            "duration": duration_sec, # Use stored duration_sec
+            "duration_iso": duration_iso, # Added ISO duration
+            "nframes": 0,
+            "audio_found": file_metadata.get("audio_found", False), # Use the flag from get_file_info
+            "audio_duration": 0,
+            "audio_fps": 0,
+            "format_name": file_metadata.get("format_name", None), # Added format name
+        }
+
+        if "video_info" in file_metadata:
+            video_info = file_metadata["video_info"]
+            manifest_source["video_found"] = True
+            manifest_source["size"] = [
+                int(video_info.get("width", 0)), 
+                int(video_info.get("height", 0))
+            ]
+            
+            # Handle FPS calculation
+            fps_str = video_info.get("r_frame_rate", video_info.get("avg_frame_rate", "0/1"))
+            try:
+                if "/" in fps_str:
+                    num, den = map(float, fps_str.split("/"))
+                    fps = num / den if den != 0 else 0
+                else:
+                    fps = float(fps_str)
+                manifest_source["fps"] = fps
+            except (ValueError, ZeroDivisionError):
+                manifest_source["fps"] = 0
+            
+            # Get duration from video stream if not in format
+            if not manifest_source["duration"] and "duration" in video_info:
+                manifest_source["duration"] = float(video_info["duration"])
+            
+            # Calculate or get number of frames
+            if "nb_frames" in video_info:
+                manifest_source["nframes"] = int(video_info["nb_frames"])
+            elif manifest_source["duration"] and manifest_source["fps"] > 0:
+                manifest_source["nframes"] = int(manifest_source["duration"] * manifest_source["fps"])
+
+            # Handle rotation
+            if "side_data_list" in video_info:
+                for side_data in video_info["side_data_list"]:
+                    if "rotation" in side_data:
+                        manifest_source["rotation"] = int(side_data["rotation"])
+                        break
+
+        if manifest_source["audio_found"] and "audio_info" in file_metadata:
+            audio_info = file_metadata["audio_info"]
+            if "duration" in audio_info:
+                manifest_source["audio_duration"] = float(audio_info["duration"])
+            
+            # Handle audio sample rate (not FPS)
+            sample_rate_str = audio_info.get("sample_rate", "0")
+            try:
+                manifest_source["audio_fps"] = int(sample_rate_str) # Store sample rate here for simplicity
+            except ValueError:
+                 manifest_source["audio_fps"] = 0
+
+        manifest.source_video = manifest.source_video.model_copy(
+            update=manifest_source
+        )
+
+    return manifest
+
+
+# --- Helper function for ISO 8601 Duration ---
+def seconds_to_iso8601_duration(seconds: float) -> Optional[str]:
+    if seconds is None or seconds < 0:
+        return None
+    
+    total_seconds = seconds
+    
+    hours = int(total_seconds // 3600)
+    total_seconds %= 3600
+    minutes = int(total_seconds // 60)
+    total_seconds %= 60
+    secs = round(total_seconds, 3) # Keep milliseconds
+    
+    duration_string = "PT"
+    if hours > 0:
+        duration_string += f"{hours}H"
+    if minutes > 0:
+        duration_string += f"{minutes}M"
+    # Always include seconds, even if 0, unless duration is exactly 0
+    if secs > 0 or duration_string == "PT":
+         # Format seconds to handle integers and floats cleanly
+         if secs == int(secs):
+              duration_string += f"{int(secs)}S"
+         else:
+              duration_string += f"{secs:.3f}S".rstrip('0').rstrip('.') + "S" # Avoid trailing zeros/periods
+
+    # Handle case where duration is exactly 0
+    if duration_string == "PT":
+        return "PT0S"
+        
+    return duration_string
+# --- End Helper ---

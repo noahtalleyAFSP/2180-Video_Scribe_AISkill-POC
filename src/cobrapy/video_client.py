@@ -1,5 +1,5 @@
 import os
-from typing import Union, Type
+from typing import Union, Type, Optional
 from ast import literal_eval
 from dotenv import load_dotenv
 from .cobra_utils import get_file_info
@@ -101,6 +101,7 @@ class VideoClient:
         objects_list_path=None,
         themes_list_path=None,
         actions_list_path=None,
+        copyright_json_str: Optional[str] = None,
     ):
         # If any list paths are provided, need to create a new analyzer instance with them
         if (peoples_list_path or emotions_list_path or objects_list_path or 
@@ -130,6 +131,7 @@ class VideoClient:
             max_concurrent_tasks=max_concurrent_tasks,
             reprocess_segments=reprocess_segments,
             person_group_id=person_group_id,
+            copyright_json_str=copyright_json_str,
         )
         
         # Return the manifest object (not the results list)

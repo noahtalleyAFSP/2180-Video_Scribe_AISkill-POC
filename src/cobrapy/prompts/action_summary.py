@@ -1,5 +1,6 @@
 import json
-
+# this prompt is currently not used, but it shows the best practices for prompting. 
+# the order of purpose, input data, task, output requirements, is highly effective. 
 action_summary_prompt = """
 You are VideoAnalyzerGPT. 
 

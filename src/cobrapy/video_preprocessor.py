@@ -21,8 +21,9 @@ from .cobra_utils import (
     parallelize_audio,
     parallelize_transcription,
     prepare_outputs_directory,
+    upload_blob,
+    generate_batch_transcript,
 )
-from .cobra_utils import generate_batch_transcript
 
 
 class VideoPreProcessor:
@@ -397,3 +398,71 @@ class VideoPreProcessor:
             os.remove(local_audio_path)
         except Exception as e:
             print(f"({get_elapsed_time(start_t)}s) Warning: Could not remove local audio file {local_audio_path}: {e}")
+
+    def _extract_and_transcribe_audio(self):
+        """Extracts the full audio, uploads if needed, and starts Batch Transcription."""
+        start_t = time.time()
+        audio_local_path = os.path.join(
+            self.manifest.processing_params.output_directory,
+            f"{os.path.splitext(self.manifest.name)[0]}.wav" # Ensure .wav extension
+        )
+        self.manifest.source_audio.path = audio_local_path
+        audio_blob_sas_url = None
+        transcription_result = None
+
+        print(f"({get_elapsed_time(start_t)}s) Extracting full audio to {audio_local_path} (Format: WAV)...")
+        try:
+            # --- Extract Audio ---
+            extract_base_audio(self.manifest.source_video.path, audio_local_path)
+
+            # ---> ADDED: Wait and check for audio file existence <---
+            max_wait_time = 5  # seconds
+            wait_interval = 0.2 # seconds
+            elapsed_wait = 0
+            while not os.path.exists(audio_local_path) and elapsed_wait < max_wait_time:
+                print(f"({get_elapsed_time(start_t)}s) Waiting for audio file {audio_local_path} to appear...")
+                time.sleep(wait_interval)
+                elapsed_wait += wait_interval
+
+            if not os.path.exists(audio_local_path):
+                 # Raise the error properly if the file STILL doesn't exist after waiting
+                 raise FileNotFoundError(f"Audio file not found after waiting: {audio_local_path}")
+            # ---> END ADDED BLOCK <---
+
+            print(f"({get_elapsed_time(start_t)}s) Audio extracted successfully. Size: {os.path.getsize(audio_local_path)/1e6:.2f} MB")
+            self.manifest.source_audio.file_size_mb = os.path.getsize(audio_local_path) / 1e6
+
+            # --- Upload and Transcribe (Only if audio extraction succeeded) ---
+            if self.env.blob_storage.account_name and self.env.blob_storage.container_name:
+                print(f"({get_elapsed_time(start_t)}s) Uploading audio to Azure Blob Storage...")
+                audio_blob_sas_url = upload_blob(
+                    local_file_path=audio_local_path,
+                    blob_name=os.path.basename(audio_local_path), # Use just the filename as blob name
+                    env=self.env,
+                    overwrite=True,
+                    read_permission_hours=48 # Grant read access for transcription service
+                )
+                if audio_blob_sas_url:
+                    print(f"({get_elapsed_time(start_t)}s) Audio uploaded. SAS URL generated.")
+                    print(f"({get_elapsed_time(start_t)}s) Starting Batch Transcription job...")
+                    # Add locale candidates if needed, defaults to en-US
+                    transcription_result = generate_batch_transcript(audio_blob_sas_url, self.env)
+                    if transcription_result:
+                        print(f"({get_elapsed_time(start_t)}s) Batch Transcription job completed and results received.")
+                        self.manifest.audio_transcription = transcription_result
+                    else:
+                        print(f"({get_elapsed_time(start_t)}s) Batch Transcription failed.")
+                else:
+                    print(f"({get_elapsed_time(start_t)}s) Failed to upload audio to Blob Storage. Skipping transcription.")
+            else:
+                print(f"({get_elapsed_time(start_t)}s) Blob Storage not configured. Skipping upload and Azure Batch Transcription.")
+
+        except FileNotFoundError as e: # Catch the specific error if file still not found
+             print(f"({get_elapsed_time(start_t)}s) Failed to find extracted audio file: {e}")
+             # Log the error and continue without transcription
+        except Exception as e:
+            print(f"({get_elapsed_time(start_t)}s) ERROR during audio extraction or transcription: {e}")
+            # Log the error, but allow preprocessing to continue if possible
+        finally:
+             if transcription_result is None:
+                  print(f"({get_elapsed_time(start_t)}s) Warning: Continuing preprocessing without transcription.")
