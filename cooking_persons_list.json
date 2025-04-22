@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify persons in a cooking/kitchen video based on their role. Use the provided labels.",
+  "persons": [
+    { "label": "Chef/Cook", "description": "The primary person actively preparing food." },
+    { "label": "Assistant", "description": "A person helping the main cook." },
+    { "label": "Guest/Observer", "description": "A person present but not actively involved in cooking." },
+    { "label": "Generic Person", "description": "Any other person visible in the kitchen setting." },
+    { "label": "N/A", "description": "Use if no distinct person role is identifiable or relevant." }
+  ]
+} 

@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify typical actions observed on a worksite. Use the provided labels.",
+  "actions": [
+    { "label": "Operating Machinery", "description": "Person controlling heavy equipment (e.g., excavator, crane)." },
+    { "label": "Carrying Materials", "description": "Person transporting items (e.g., pipes, wood, tools)." },
+    { "label": "Manual Labor", "description": "Person engaged in physical work (e.g., digging, hammering, lifting)." },
+    { "label": "Supervising", "description": "Person observing or directing others, often holding plans or pointing." },
+    { "label": "Standing/Walking", "description": "General movement or stationary presence on the site." }
+  ]
+} 

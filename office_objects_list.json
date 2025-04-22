@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify standard office furniture and equipment visible in the video. Use the provided labels.",
+  "objects": [
+    { "label": "Desk", "description": "Standard office work desk." },
+    { "label": "Office Chair", "description": "Chair typically used at a desk." },
+    { "label": "Computer Monitor", "description": "Display screen connected to a computer." },
+    { "label": "Laptop", "description": "Portable computer." },
+    { "label": "Whiteboard", "description": "A large white surface used for writing or presentations." }
+  ]
+} 

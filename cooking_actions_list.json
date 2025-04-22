@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify typical cooking actions performed in the video. Use the provided labels.",
+  "actions": [
+    { "label": "Chopping/Cutting", "description": "Person using a knife to cut ingredients." },
+    { "label": "Stirring", "description": "Person mixing ingredients in a pot, pan, or bowl." },
+    { "label": "Measuring", "description": "Person using measuring cups or spoons." },
+    { "label": "Heating/Cooking", "description": "Food being cooked on a stove or in an oven." },
+    { "label": "Washing", "description": "Person washing ingredients or utensils." }
+  ]
+} 

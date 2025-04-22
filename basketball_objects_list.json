@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify specific basketball equipment visible in the video. Use the provided labels.",
+  "objects": [
+    { "label": "Basketball", "description": "The orange spherical ball used in the game." },
+    { "label": "Basketball Hoop", "description": "The complete structure including the rim and backboard." },
+    { "label": "Rim", "description": "The metal ring component of the hoop." },
+    { "label": "Backboard", "description": "The flat vertical board behind the rim." },
+    { "label": "Court Floor", "description": "The playing surface with lines." }
+  ]
+} 

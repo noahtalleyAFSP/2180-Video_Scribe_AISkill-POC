@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify persons in a basketball game video based on their role. Use the provided labels.",
+  "persons": [
+    { "label": "Player - Team A", "description": "A person wearing the designated jersey/color for Team A." },
+    { "label": "Player - Team B", "description": "A person wearing the designated jersey/color for Team B." },
+    { "label": "Referee", "description": "A person wearing a referee uniform (typically black and white stripes)." },
+    { "label": "Coach", "description": "A person on the sidelines, often dressed differently than players, appearing to give instructions." },
+    { "label": "Spectator", "description": "Any person in the stands or background not actively involved in the game." }
+  ]
+} 

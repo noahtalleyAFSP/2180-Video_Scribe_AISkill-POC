@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify persons in a construction/industrial setting based SOLELY on their safety gear. Categorize each worker ONLY as 'Compliant Worker' or 'Non-Compliant Worker' using the definitions below. Do NOT use generic descriptions like 'man in blue shirt'.",
+  "persons": [
+    { "label": "Compliant Worker", "description": "A person clearly wearing BOTH a safety helmet (hard hat) AND a high-visibility jacket/vest." },
+    { "label": "Non-Compliant Worker", "description": "A person in a construction/industrial setting who is MISSING EITHER a safety helmet (hard hat) OR a high-visibility jacket/vest (or is missing both)." },
+    { "label": "Visitor/Supervisor (Compliant)", "description": "A person not performing manual labor but wearing BOTH a hard hat AND high-visibility vest (e.g., supervisor in clean gear, visitor)." },
+    { "label": "Visitor/Supervisor (Non-Compliant)", "description": "A person not performing manual labor who is MISSING EITHER a hard hat OR high-visibility vest." },
+    { "label": "Unidentifiable Person", "description": "A person whose safety gear status cannot be clearly determined due to distance, obstruction, or image quality." }
+  ]
+} 

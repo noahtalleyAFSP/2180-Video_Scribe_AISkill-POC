@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify common safety equipment visible in the video. Use the provided labels.",
+  "objects": [
+    { "label": "Hard Hat", "description": "Safety helmet worn on the head." },
+    { "label": "High-Visibility Vest/Jacket", "description": "Brightly colored (e.g., yellow, orange, lime green) safety vest or jacket." },
+    { "label": "Safety Glasses", "description": "Protective eyewear." },
+    { "label": "Work Boots", "description": "Sturdy footwear appropriate for a worksite." },
+    { "label": "Tool", "description": "Any handheld instrument being used for work (e.g., hammer, shovel, drill)." }
+  ]
+} 

@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify typical office activities performed in the video. Use the provided labels.",
+  "actions": [
+    { "label": "Typing", "description": "Person using a keyboard." },
+    { "label": "Talking", "description": "Person engaged in conversation." },
+    { "label": "Writing", "description": "Person writing on paper or a whiteboard." },
+    { "label": "Presenting", "description": "Person actively delivering information to others." },
+    { "label": "Sitting", "description": "Person seated in a chair." }
+  ]
+} 

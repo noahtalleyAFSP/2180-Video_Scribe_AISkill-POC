@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify common basketball actions performed in the video. Use the provided labels.",
+  "actions": [
+    { "label": "Dribbling", "description": "Player bouncing the basketball." },
+    { "label": "Shooting", "description": "Player attempting to score by throwing the ball at the hoop." },
+    { "label": "Passing", "description": "Player throwing the ball to a teammate." },
+    { "label": "Running", "description": "Player moving quickly across the court." },
+    { "label": "Blocking", "description": "Player legally deflecting a shot attempt." }
+  ]
+} 

@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify persons in an office environment video based on their role, if discernible. Use the provided labels.",
+  "persons": [
+    { "label": "Office Worker", "description": "A person working at a desk, using a computer, or engaged in typical office tasks." },
+    { "label": "Presenter", "description": "A person speaking or presenting to others, possibly using a whiteboard or screen." },
+    { "label": "Meeting Attendee", "description": "A person participating in a meeting, often seated around a table." },
+    { "label": "Receptionist", "description": "A person located at a front desk area." },
+    { "label": "Generic Person", "description": "Any other person visible in the office setting not clearly fitting another role." }
+  ]
+} 

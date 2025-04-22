@@ -1,0 +1,10 @@
+{
+  "instructions": "Identify common kitchen utensils and appliances visible in the video. Use the provided labels.",
+  "objects": [
+    { "label": "Pot/Pan", "description": "Cookware used on a stove (specify type if clear, e.g., 'Frying Pan')." },
+    { "label": "Knife", "description": "Cutting utensil." },
+    { "label": "Cutting Board", "description": "Surface used for chopping ingredients." },
+    { "label": "Mixing Bowl", "description": "Bowl used for combining ingredients." },
+    { "label": "Stove/Oven", "description": "Cooking appliance." }
+  ]
+} 
