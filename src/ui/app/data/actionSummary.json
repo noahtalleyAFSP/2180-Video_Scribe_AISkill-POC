@@ -1,0 +1,203 @@
+[
+    {
+        "start_timestamp": "0.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "5.0s",
+        "scene_theme": "Unclear",
+        "characters": "Unknown",
+        "summary": "The video begins, the context is unclear due to lack of audio and initial frames.",
+        "actions": "No actions can be determined.",
+        "key_objects": "No visible objects or people."
+    },
+    {
+        "start_timestamp": "5.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "10.0s",
+        "scene_theme": "Unclear",
+        "characters": "Unknown",
+        "summary": "The segment continues with no visible actions or context.",
+        "actions": "No discernible actions.",
+        "key_objects": "No visible objects or people."
+    },
+    {
+        "start_timestamp": "10.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "14.0s",
+        "scene_theme": "Dynamic",
+        "characters": "Player in blue jersey, referee in black and white stripes",
+        "summary": "The blue team player is dribbling the basketball past the center line, advancing towards the opponent's basket.",
+        "actions": "Dribbling the basketball while moving forward. The referee is observing the play closely.",
+        "key_objects": "Basketball, blue jersey worn by the player, black and white striped jersey worn by the referee."
+    },
+    {
+        "start_timestamp": "14.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "20.0s",
+        "scene_theme": "Competitive",
+        "characters": "Players from both teams, one in red jersey, another in blue jersey",
+        "summary": "A player in a red jersey attempts to intercept the ball from the player in the blue jersey.",
+        "actions": "Defensive maneuver by the player in red jersey, attempting a steal. The player in blue jersey skillfully evades the attempt.",
+        "key_objects": "Ball, red and blue jerseys worn by the players."
+    },
+    {
+        "start_timestamp": "20.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "25.0s",
+        "scene_theme": "Action-Paced",
+        "characters": "Player in red jersey, Player in blue jersey",
+        "summary": "A player in a red jersey dribbles the basketball swiftly across the court while a player in a blue jersey attempts to block the movement.",
+        "actions": "The player in red jersey is dribbling rapidly and advancing towards the basket. The player in blue jersey is seen trying to intercept and block the path.",
+        "key_objects": "Basketball, red jersey with number 10, blue jersey with number 23, basketball court with visible lines."
+    },
+    {
+        "start_timestamp": "25.1s",
+        "sentiment": "Neutral",
+        "end_timestamp": "30.0s",
+        "scene_theme": "Tension-Packed",
+        "characters": "Player in red jersey, Player in blue jersey, Referee",
+        "summary": "The game gets intense as the player in red attempts a shot while being closely guarded by the player in blue. The referee watches attentively.",
+        "actions": "The player in red leaps to shoot the ball while the player in blue jumps to block. The referee stays focused on the play to make any necessary calls.",
+        "key_objects": "Basketball, hoop, red jersey with number 10, blue jersey with number 23, referee in black and white uniform."
+    },
+    {
+        "start_timestamp": "30.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "35.0s",
+        "scene_theme": "Dynamic, Active",
+        "characters": "Player in red jersey, player in blue jersey",
+        "summary": "The video segment begins with a player in a red jersey actively dribbling a basketball across the court. A player in a blue jersey positions himself defensively, anticipating the red player's moves.",
+        "actions": "The player in red jersey dribbles the ball while the player in blue maintains a defensive stance, tracking the ball and the opponent's movements.",
+        "key_objects": "Basketball, red jersey, blue jersey. The court surface is visible, providing context for the characters\u2019 positions."
+    },
+    {
+        "start_timestamp": "35.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "40.0s",
+        "scene_theme": "Competitive, Tense",
+        "characters": "Player in red jersey, player in blue jersey",
+        "summary": "Continuing the play, the red jersey player attempts to maneuver around the blue jersey player, who is blocking the path. Both players show intense focus on gaining control of the ball.",
+        "actions": "The player in red attempts to perform a crossover dribble to outmaneuver the defensive blue player. Meanwhile, the blue player shifts quickly, trying to intercept or block the ball.",
+        "key_objects": "Basketball, players in red and blue jerseys. The lines on the court are more pronounced as positions and movements are more tactical."
+    },
+    {
+        "start_timestamp": "40.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "44.5s",
+        "scene_theme": "Action-Packed",
+        "characters": "Multiple basketball players from both teams visible, including a tall player in a red jersey and a short player in a blue jersey.",
+        "summary": "The sequence begins with a fast-paced action on the basketball court. The players are intensely focused as both teams try to gain possession of the ball.",
+        "actions": "The tall player in the red jersey jumps to catch a pass, while the short player in the blue jersey attempts to block.",
+        "key_objects": "Basketball, court with marked lines, red jersey (tall player), blue jersey (short player), basketball hoops."
+    },
+    {
+        "start_timestamp": "44.5s",
+        "sentiment": "Neutral",
+        "end_timestamp": "50.0s",
+        "scene_theme": "Competitive",
+        "characters": "Players from both teams, unspecified number.",
+        "summary": "The play continues as a player in blue gains control of the ball, dribbling skillfully across the court. Red team players are on defense, strategizing to intercept.",
+        "actions": "The player in blue dodges an opponent and passes the ball to a teammate near the hoop.",
+        "key_objects": "Basketball, court with boundary lines, jerseys in red and blue, basketball hoop, sneakers."
+    },
+    {
+        "start_timestamp": "50.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "55.0s",
+        "scene_theme": "Routine Activity",
+        "characters": "Two adults, one wearing a blue jacket and another with a black hat.",
+        "summary": "In this segment, two adults are seen walking through a park. They seem engaged in a casual conversation, occasionally gesturing with their hands. The environment appears calm and quiet, indicating a typical day in the park.",
+        "actions": "The first adult adjusts their hat while the second adult points towards the distance, possibly indicating something of interest.",
+        "key_objects": "The park setting is evident with trees in the background. The adult in the blue jacket is carrying a brown bag, whereas the person in the black hat has a watch visible on their left wrist."
+    },
+    {
+        "start_timestamp": "55.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "60.0s",
+        "scene_theme": "Casual Interaction",
+        "characters": "A small child joining the two adults, making a group of three.",
+        "summary": "As the segment progresses, a small child runs towards the adults, and they pause to greet the child. The adults appear to be amused by the child's presence, sharing smiles.",
+        "actions": "The child enthusiastically waves, and one of the adults bends down to engage with the child by patting them on the back.",
+        "key_objects": "The child is wearing a red cap and a yellow backpack. The atmosphere remains consistent with the park's serene vibe, populated by a few benches and walking paths."
+    },
+    "Current Action Summary",
+    {
+        "start_timestamp": "70.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "75.0s",
+        "scene_theme": "Dynamic",
+        "characters": "Person with a red shirt, another with a blue cap",
+        "summary": "A person in a red shirt seems to be interacting or gesturing towards someone with a blue cap. The scene is engaging and involves some form of communication or exchange between them.",
+        "actions": "The person with the red shirt waves and appears to point to something, while the one with the blue cap nods.",
+        "key_objects": "Red shirt, blue cap, some documents or papers on a table nearby"
+    },
+    {
+        "start_timestamp": "75.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "80.0s",
+        "scene_theme": "Cooperative",
+        "characters": "Person with a red shirt, another with a blue cap",
+        "summary": "The interaction continues fluidly as the two individuals seem to agree or plan something together, possibly referring to the documents on the table.",
+        "actions": "The person with the blue cap leans forward, gesturing towards the documents, while the person in the red shirt listens attentively.",
+        "key_objects": "Red shirt, blue cap, documents or papers on a table"
+    },
+    {
+        "start_timestamp": "80.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "85.0s",
+        "scene_theme": "Intense",
+        "characters": "Player in red jersey, player in blue jersey",
+        "summary": "Players are focusing intensely on the game. The scene depicts close competition between the two teams.",
+        "actions": "The player in the red jersey is dribbling the basketball while being closely guarded by the player in the blue jersey.",
+        "key_objects": "Basketball, red jersey, blue jersey, court lines visible on the floor."
+    },
+    {
+        "start_timestamp": "85.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "90.0s",
+        "scene_theme": "Competitive",
+        "characters": "Player in red jersey, player in blue jersey",
+        "summary": "The gameplay continues with an energetic pace, as players maneuver around each other strategically.",
+        "actions": "The red jersey player attempts to make a pass while the blue jersey player tries to intercept.",
+        "key_objects": "Basketball, court floor, team jerseys in red and blue."
+    },
+    {
+        "start_timestamp": "90.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "95.0s",
+        "scene_theme": "Tense",
+        "characters": "Player in red jersey, player in blue jersey, referee with black and white stripes",
+        "summary": "The scene captures a tense moment on the basketball court as two players face off. The player in the red jersey is dribbling quickly while being closely guarded by the player in the blue jersey. The referee is attentively watching the action.",
+        "actions": "The player in red jersey dribbles the ball skillfully while attempting to evade the opposing player. The player in blue jersey is on defense, trying to block any advances. The referee is positioned near the action ensuring fair play.",
+        "key_objects": "Basketball held by the player in red jersey, red and blue jerseys worn by the players, and the whistle held by the referee. The basketball court is visible with painted lines and wood flooring."
+    },
+    {
+        "start_timestamp": "95.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "100.0s",
+        "scene_theme": "Competitive",
+        "characters": "Player in red jersey, player in blue jersey, member of the audience wearing a yellow shirt",
+        "summary": "In this competitive scene, the player in the red jersey takes a shot at the basket. The player in blue jersey leaps up in an attempt to block the shot as the audience watches with anticipation.",
+        "actions": "The player in red jersey jumps into the air, aiming to score a basket. The player in blue jersey mirrors this action, trying to prevent the scoring. An audience member in a yellow shirt is visible, exhibiting an expression of excitement.",
+        "key_objects": "Basketball near the hoop, red and blue jerseys indicating team representation, and an audience member's yellow shirt showing a diverse crowd presence. The basketball hoop and net are clearly visible above the players."
+    },
+    {
+        "start_timestamp": "100.0s",
+        "sentiment": "Neutral",
+        "end_timestamp": "105.0s",
+        "scene_theme": "Tense",
+        "characters": "Player A, Player B, Referee",
+        "summary": "Two players are intensely positioned near each other, possibly preparing for a decisive play or move. There is a visible tension as both players focus intently. The referee is nearby monitoring the situation.",
+        "actions": "Player A appears to be in a defensive stance, monitoring Player B closely. Player B is preparing to make a move, possibly dribbling or setting up a pass.",
+        "key_objects": "Player A is wearing a red jersey and white sneakers. Player B is in a blue jersey with black shoes. The referee is in the traditional black and white striped uniform, holding a whistle."
+    },
+    {
+        "start_timestamp": "105.0s",
+        "sentiment": "Positive",
+        "end_timestamp": "109.82s",
+        "scene_theme": "Climactic",
+        "characters": "Player B, Teammates, Opposing Team",
+        "summary": "Player B deftly maneuvers past opponents, showcasing agility and skill. Teammates are spread out, positioning themselves strategically. The opposing team is attempting to intercept.",
+        "actions": "Player B successfully dribbles past one defender and makes a strategic pass to a teammate. The teammates move in synchronization, creating an opening. The opposing team is actively attempting to block the advance.",
+        "key_objects": "Player B in a blue jersey, teammates wearing varying colored jerseys, basketball, court markings, opposing team in a mix of green and yellow jerseys."
+    }
+]
