@@ -3,7 +3,7 @@ import time
 import math
 import numpy as np
 import psutil
-from typing import Union, Type, Optional, List, Tuple
+from typing import Union, Type, Optional, List, Tuple, Dict, Set
 
 import concurrent.futures
 import requests
@@ -36,6 +36,7 @@ from .cobra_utils import (
     prepare_outputs_directory,
     upload_blob,
     generate_batch_transcript,
+    validate_video_manifest
 )
 
 # --- ADDED: Helper function for dominant color extraction ---
@@ -129,10 +130,96 @@ def _get_dominant_colors(image_path: str, num_colors: int = 5, resize_width: int
 class VideoPreProcessor:
     # take either a video manifest object or a path to a video manifest file
     def __init__(
-        self, video_manifest: Union[str, VideoManifest], env: CobraEnvironment
+        self,
+        video_manifest: Union[str, VideoManifest],
+        env: CobraEnvironment,
+        person_group_id: Optional[str] = None,
+        # REMOVE LIST PATH ARGUMENTS - Not needed for preprocessing
+        # peoples_list_path: Optional[str] = None,
+        # emotions_list_path: Optional[str] = None, # Assuming these keep the old list format for now
+        # objects_list_path: Optional[str] = None,
+        # themes_list_path: Optional[str] = None,   # Assuming these keep the old list format for now
+        # actions_list_path: Optional[str] = None,
     ):
-        self.manifest = video_manifest
+        # ------------------------------------------------------------
+        # 0 · boiler-plate / basic fields
+        # ------------------------------------------------------------
+        self.manifest = validate_video_manifest(video_manifest)
         self.env = env
+        self.person_group_id = person_group_id
+
+        # ------------------------------------------------------------
+        # 1 · load the optional lookup files & instructions
+        # ------------------------------------------------------------
+        # Load the map (label->description) and instructions
+        # self.persons_map, self.persons_instructions = self._load_json_list(peoples_list_path, "persons")
+        # self.actions_map, self.actions_instructions = self._load_json_list(actions_list_path, "actions")
+        # self.objects_map, self.objects_instructions = self._load_json_list(objects_list_path, "objects")
+
+        # # Assuming emotions and themes still use the old list format for now
+        # # Adjust if their format also changes
+        # self.emotions_list, _ = self._load_json_list(emotions_list_path, "emotions") # Ignore instructions for list format
+        # self.themes_list, _   = self._load_json_list(themes_list_path,   "themes")   # Ignore instructions for list format
+
+        # # ------------------------------------------------------------
+        # # 2 · Populate known label sets AND prepare data for prompts
+        # # ------------------------------------------------------------
+
+        # # --- Persons ---
+        # self._current_known_persons: Set[str] = set(self.persons_map.keys()) if self.persons_map else set()
+        # self._persons_for_prompt: List[Dict[str, str]] = [
+        #     {"label": label, "description": desc}
+        #     for label, desc in self.persons_map.items()
+        # ] if self.persons_map else []
+
+        # # --- Actions ---
+        # self._current_known_actions: Set[str] = set(self.actions_map.keys()) if self.actions_map else set()
+        # self._actions_for_prompt: List[Dict[str, str]] = [
+        #     {"label": label, "description": desc}
+        #     for label, desc in self.actions_map.items()
+        # ] if self.actions_map else []
+
+        # # --- Objects ---
+        # self._current_known_objects: Set[str] = set(self.objects_map.keys()) if self.objects_map else set()
+        # self._objects_for_prompt: List[Dict[str, str]] = [
+        #     {"label": label, "description": desc}
+        #     for label, desc in self.objects_map.items()
+        # ] if self.objects_map else []
+
+        # # --- Emotions (Assuming old format) ---
+        # self._current_known_emotions: Set[str] = {
+        #     item["label"].strip()
+        #     for item in self.emotions_list.get("emotions", [])
+        #     if isinstance(item, dict) and isinstance(item.get("label"), str)
+        # } if isinstance(self.emotions_list, dict) else set()
+        # # Store for prompt if needed, adjust if format changed
+        # self._emotions_for_prompt: List[Dict[str, str]] = self.emotions_list.get("emotions", []) if isinstance(self.emotions_list, dict) else []
+
+
+        # # --- Themes (Assuming old format) ---
+        # self._current_known_themes: Set[str] = {
+        #      item["label"].strip()
+        #      for item in self.themes_list.get("themes", [])
+        #      if isinstance(item, dict) and isinstance(item.get("label"), str)
+        # } if isinstance(self.themes_list, dict) else set()
+        #  # Store for prompt if needed, adjust if format changed
+        # self._themes_for_prompt: List[Dict[str, str]] = self.themes_list.get("themes", []) if isinstance(self.themes_list, dict) else []
+
+
+        # # ------------------------------------------------------------
+        # # 3 · misc bookkeeping
+        # # ------------------------------------------------------------
+        # # REMOVE - Not needed in preprocessor
+        # # self.token_usage: Dict[str, int]  # declare
+        # # self.token_usage = {"chapters": 0, "tags": 0, "summary": 0, "total": 0}
+
+        # # quick sanity-check (REMOVE)
+        # # print("Loaded persons map:", bool(self.persons_map))
+        # # print("Loaded actions map:", bool(self.actions_map))
+        # # print("Loaded objects map:", bool(self.objects_map))
+        # # print("Known persons:", self._current_known_persons)
+        # # print("Known actions:", self._current_known_actions)
+        # # print("Known objects:", self._current_known_objects)
 
     def preprocess_video(
         self,
@@ -348,7 +435,6 @@ class VideoPreProcessor:
                 segment.number_of_frames = min_list_length # Update frame count
 
 
-        write_video_manifest(self.manifest)
         return self.manifest.video_manifest_path
 
     def _generate_segments(self, scene_list: Optional[List[Tuple[float, float]]] = None):
@@ -380,7 +466,11 @@ class VideoPreProcessor:
             max_scene_duration = self.manifest.processing_params.segment_length
             if max_scene_duration is None or max_scene_duration <= 0:
                 print(f"Warning: Invalid segment_length ({max_scene_duration}) for scene splitting threshold. Defaulting to 30.0s.")
-                max_scene_duration = 30.0
+                max_scene_duration = 30.0 # Fallback splitting threshold
+
+            # --- ADDED: Define max analysis unit duration --- 
+            ANALYSIS_UNIT_MAX_SECONDS = 30.0
+            print(f"DEBUG: Enforcing max analysis unit duration of {ANALYSIS_UNIT_MAX_SECONDS}s.")
 
             for i, (scene_start_time, scene_end_time) in enumerate(scene_list):
                 # Ensure end_time doesn't exceed video duration slightly due to frame boundaries
@@ -403,13 +493,13 @@ class VideoPreProcessor:
                     continue
 
                 # --- Split long scenes ---
-                if scene_duration > max_scene_duration:
-                    print(f"Scene {i+1} ({scene_start_time:.3f}s to {scene_end_time:.3f}s) is longer than {max_scene_duration:.1f}s. Splitting into sub-segments.")
-                    num_sub_segments = math.ceil(scene_duration / max_scene_duration)
+                if scene_duration > ANALYSIS_UNIT_MAX_SECONDS:
+                    print(f"Scene {i+1} ({scene_start_time:.3f}s to {scene_end_time:.3f}s) is longer than {ANALYSIS_UNIT_MAX_SECONDS:.1f}s. Splitting into sub-segments.")
+                    num_sub_segments = math.ceil(scene_duration / ANALYSIS_UNIT_MAX_SECONDS)
 
                     for part_idx in range(num_sub_segments):
-                        sub_start_time = scene_start_time + (part_idx * max_scene_duration)
-                        sub_end_time = min(sub_start_time + max_scene_duration, scene_end_time)
+                        sub_start_time = scene_start_time + (part_idx * ANALYSIS_UNIT_MAX_SECONDS)
+                        sub_end_time = min(sub_start_time + ANALYSIS_UNIT_MAX_SECONDS, scene_end_time)
                         sub_duration = sub_end_time - sub_start_time
 
                         # Check if sub-segment is long enough for frames
@@ -445,7 +535,7 @@ class VideoPreProcessor:
                         )
                         actual_segments_created += 1
                 else:
-                    # --- Process scenes shorter than or equal to max_scene_duration ---
+                    # --- Process scenes shorter than or equal to ANALYSIS_UNIT_MAX_SECONDS ---
                     # (This is the original logic, slightly adapted)
                     start_time = scene_start_time
                     end_time = scene_end_time
@@ -490,6 +580,10 @@ class VideoPreProcessor:
             # --- Use Time-Based Segmentation (Existing Logic, with added check) ---
             print("Generating segments based on fixed time intervals...")
             segment_length = self.manifest.processing_params.segment_length
+            # --- ADDED: Define max analysis unit duration --- 
+            ANALYSIS_UNIT_MAX_SECONDS = 30.0
+            print(f"DEBUG: Enforcing max analysis unit duration of {ANALYSIS_UNIT_MAX_SECONDS}s for time-based segments.")
+
             trim_to_nearest_second = self.manifest.processing_params.trim_to_nearest_second
             allow_partial_segments = self.manifest.processing_params.allow_partial_segments
 
@@ -517,56 +611,67 @@ class VideoPreProcessor:
             )
 
             skipped_count = 0
+            actual_segments_created = 0 # Track segments added to manifest
+
             for i in range(num_segments):
-                start_time = i * segment_length
-                end_time = min((i + 1) * segment_length, effective_duration)
-                segment_duration = end_time - start_time
+                orig_start_time = i * segment_length
+                orig_end_time = min((i + 1) * segment_length, effective_duration)
+                orig_segment_duration = orig_end_time - orig_start_time
 
-                # --- ADD CHECK: Skip segments too short for frame extraction ---
-                min_duration_for_frame = 1.0 / analysis_fps if analysis_fps > 0 else float('inf')
-                # Add tolerance for floating point comparisons
-                if segment_duration < min_duration_for_frame - 0.001:
-                    print(f"Skipping time segment {i+1} ({start_time:.3f}s to {end_time:.3f}s): duration {segment_duration:.3f}s is too short for frame extraction at {analysis_fps:.2f} fps (min {min_duration_for_frame:.3f}s).")
-                    skipped_count += 1
-                    continue
-                # --- END CHECK ---
+                # --- Split long time-based segments based on ANALYSIS_UNIT_MAX_SECONDS --- 
+                if orig_segment_duration > ANALYSIS_UNIT_MAX_SECONDS:
+                     print(f"Time segment {i+1} ({orig_start_time:.3f}s to {orig_end_time:.3f}s) is longer than {ANALYSIS_UNIT_MAX_SECONDS:.1f}s. Splitting.")
+                     num_sub_segments_time = math.ceil(orig_segment_duration / ANALYSIS_UNIT_MAX_SECONDS)
+                     for part_idx_time in range(num_sub_segments_time):
+                          sub_start_time = orig_start_time + (part_idx_time * ANALYSIS_UNIT_MAX_SECONDS)
+                          sub_end_time = min(sub_start_time + ANALYSIS_UNIT_MAX_SECONDS, orig_end_time)
+                          sub_duration = sub_end_time - sub_start_time
+                          # Call helper to create the sub-segment
+                          self._create_segment_object(f"seg{i+1}_part{part_idx_time+1}", sub_start_time, sub_end_time, sub_duration, analysis_fps)
+                          actual_segments_created += 1
+                else:
+                     # --- Process time segments shorter than or equal to ANALYSIS_UNIT_MAX_SECONDS ---
+                     # Check if segment is long enough for frame extraction
+                     min_duration_for_frame = 1.0 / analysis_fps if analysis_fps > 0 else float('inf')
+                     if orig_segment_duration < min_duration_for_frame - 0.001:
+                          print(f"Skipping time segment {i+1} ({orig_start_time:.3f}s to {orig_end_time:.3f}s): duration {orig_segment_duration:.3f}s too short for frame extraction.")
+                          skipped_count += 1
+                          continue
+                     # Call helper to create the segment object
+                     self._create_segment_object(f"seg{i+1}", orig_start_time, orig_end_time, orig_segment_duration, analysis_fps)
+                     actual_segments_created += 1
 
-                number_of_frames_in_segment = math.ceil(segment_duration * analysis_fps)
-                number_of_frames_in_segment = max(1, number_of_frames_in_segment) # Ensure at least one frame
-
-                # Use endpoint=True for linspace if only one frame to get the start time
-                use_endpoint = number_of_frames_in_segment > 1
-                segment_frames_times = np.linspace(
-                    start_time, end_time, number_of_frames_in_segment, endpoint=use_endpoint
-                )
-                 # Correct single-frame time to be start_time
-                if number_of_frames_in_segment == 1:
-                     segment_frames_times = [start_time]
-
-                segment_frames_times = [round(x, 3) for x in segment_frames_times] # Use 3 decimals
-
-                segment_name = f"seg{i+1}_start{start_time:.3f}s_end{end_time:.3f}s" # More precise name
-                output_directory = self.manifest.processing_params.output_directory
-                segment_folder_path = os.path.join(output_directory, segment_name)
-                os.makedirs(segment_folder_path, exist_ok=True)
-
-                self.manifest.segments.append(
-                    Segment(
-                        segment_name=segment_name,
-                        segment_folder_path=segment_folder_path,
-                        start_time=round(start_time, 3),
-                        end_time=round(end_time, 3),
-                        segment_duration=round(segment_duration, 3),
-                        number_of_frames=number_of_frames_in_segment,
-                        segment_frame_time_intervals=segment_frames_times,
-                        processed=False,
-                    )
-                )
-            # Update num_segments after potential skips
-            final_num_segments = num_segments - skipped_count
+            # Update num_segments based on actual segments created
+            final_num_segments = actual_segments_created
             self.manifest.segment_metadata.num_segments = final_num_segments
-            print(f"Created {final_num_segments} segments based on time interval (skipped {skipped_count}).")
+            print(f"Created {final_num_segments} final analysis segments based on time interval (skipped {skipped_count} original segments). Split {num_segments - skipped_count - actual_segments_created} long segments.")
 
+
+    def _create_segment_object(self, base_name: str, start_time: float, end_time: float, segment_duration: float, analysis_fps: float): 
+        """Helper function to calculate frames and create a Segment object."""
+        number_of_frames = max(1, math.ceil(segment_duration * analysis_fps))
+        use_endpoint = number_of_frames > 1
+        frame_times = np.linspace(start_time, end_time, number_of_frames, endpoint=use_endpoint)
+        if number_of_frames == 1: frame_times = [start_time]
+        frame_times = [round(t, 3) for t in frame_times]
+
+        segment_name = f"{base_name}_start{start_time:.3f}s_end{end_time:.3f}s"
+        output_directory = self.manifest.processing_params.output_directory
+        segment_folder_path = os.path.join(output_directory, segment_name)
+        os.makedirs(segment_folder_path, exist_ok=True)
+
+        self.manifest.segments.append(
+            Segment(
+                segment_name=segment_name,
+                segment_folder_path=segment_folder_path,
+                start_time=round(start_time, 3),
+                end_time=round(end_time, 3),
+                segment_duration=round(segment_duration, 3),
+                number_of_frames=number_of_frames,
+                segment_frame_time_intervals=frame_times,
+                processed=False,
+            )
+        )
 
     def _preprocess_segment(self, segment: Segment, index: int, transcription_text: Optional[str], downscale_to_max_width=None, downscale_to_max_height=None):
         stop_watch_time = time.time()
