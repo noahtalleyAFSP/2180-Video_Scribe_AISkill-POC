@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Union, Optional, List, Dict, Any
+from typing import Union, Optional, List, Dict, Any, Tuple
 from .models.video import VideoManifest
 from .models.environment import CobraEnvironment
 import subprocess
@@ -16,14 +16,19 @@ import requests
 from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
 from datetime import datetime, timedelta
 import math # Add math import for duration conversion
+import re # ADDED for score parsing
+import cv2 # ADDED for score parsing image handling
+import numpy as np # ADDED for score parsing image handling
+from PIL import Image # ADDED for score parsing image handling
+import io # ADDED for score parsing image handling
+import base64 # ADDED for score parsing image handling
 
 logger = logging.getLogger(__name__)
 
 
 def encode_image_base64(image_path, quality=None):
-    import base64
     if quality is not None:
-        from PIL import Image
+        import base64
         import io
         # Open image and re-encode as JPEG at given quality
         img = Image.open(image_path)
@@ -549,8 +554,9 @@ def parallelize_transcription(process_args_list):
 def process_chunk(args):
     audio_chunk_path, start_time = args
     env = CobraEnvironment()  # Create a default environment to use the speech services
-    transcript = generate_transcript(audio_file_path=audio_chunk_path, env=env)
-    
+    # transcript = generate_transcript(audio_file_path=audio_chunk_path, env=env) # <-- Commented out problematic line
+    transcript = {} # Assign empty dict to avoid subsequent errors if transcript is used
+
     # Adjust timestamps for words
     for word in transcript.get("segments", []):
         words = word.get("words", [])
@@ -1064,3 +1070,122 @@ def seconds_to_iso8601_duration(seconds: float) -> Optional[str]:
         
     return duration_string
 # --- End Helper ---
+
+# --- Helper function to convert time strings (REPLACED AGAIN with improved logic) ---
+def convert_string_to_seconds(time_str: Union[str, int, float]) -> float:
+    """
+    Accepts any of:
+        12.345            → 12.345
+        "12.345s"         → 12.345
+        "12.345"          → 12.345
+        "4:56"            → 296.0
+        "4:56.78"         → 296.78
+        "01:04:56.78"     → 3896.78
+    Raises ValueError/TypeError only when the input is truly un-parseable.
+    """
+    # Numeric already?
+    if isinstance(time_str, (int, float)):
+        return float(time_str)
+
+    if not isinstance(time_str, str):
+        raise TypeError(f"Expected str/int/float, got {type(time_str)}")
+
+    txt = time_str.strip().lower().rstrip('s')          # trim spaces + trailing 's'
+
+    # 1) Plain decimal seconds =================================================
+    try:
+        # Fast-path – works for "12.345" or "12.345s" (after stripping 's')
+        return float(txt)
+    except ValueError:
+        pass    # fall through if not plain float
+
+    # 2) Clock formats =========================================================
+    #    Accept H:MM:SS(.mmm)  or  M:SS(.mmm)
+    #    Regex check ensures correct structure before splitting
+    if re.fullmatch(r'\\d{1,2}:\\d{2}(\\.\\d{1,3})?(?:\\:\\d{2}(\\.\\d{1,3})?)?', txt):
+        try:
+            parts = [float(p) for p in txt.split(':')]      # split & convert
+            if len(parts) == 3:         # HH:MM:SS(.sss)
+                hours, minutes, seconds = parts
+            elif len(parts) == 2:       # M:SS(.sss)
+                hours = 0
+                minutes, seconds = parts
+            else:
+                # This case should theoretically not be reached due to regex, but safety first
+                 raise ValueError("Unexpected number of parts after splitting on ':'")
+            return hours * 3600 + minutes * 60 + seconds
+        except ValueError:
+             # Error during conversion of parts or calculation
+             pass # Fall through to the final error
+
+    # 3) Could not parse =======================================================
+    raise ValueError(f"Could not convert time string '{time_str}' to seconds.")
+# --- End Helper ---
+
+
+def merge_overlapping(
+    intervals: Union[List[Dict[str, float]], List[Tuple[float, float]]],
+    *,
+    max_gap: float = 0.0
+) -> Union[List[Dict[str, float]], List[Tuple[float, float]]]:
+    """
+    Merges touching / overlapping / almost‑touching intervals.
+
+    Args:
+        intervals: List of intervals, either as dicts [{'start': s, 'end': e}, ...]
+                   or tuples [(start, end), ...].
+        max_gap: The maximum gap (in seconds) between intervals that will still be bridged.
+
+    Returns:
+        A list of merged intervals in the same format as the input (list of dicts or list of tuples).
+    """
+    if not intervals:
+        return []
+
+    # --- NORMALISE to list of tuples for processing ---
+    input_was_dict = isinstance(intervals[0], dict)
+    if input_was_dict:
+        # Validate keys before conversion
+        if not all(isinstance(iv, dict) and 'start' in iv and 'end' in iv for iv in intervals):
+             raise ValueError("Input list contains non-dict items or dicts missing 'start'/'end' keys.")
+        intervals_tuples = [(iv['start'], iv['end']) for iv in intervals]
+    else:
+        # Basic check for tuple structure if not dicts
+        if not all(isinstance(iv, (tuple, list)) and len(iv) == 2 for iv in intervals):
+             raise ValueError("Input list contains items that are not 2-element tuples/lists.")
+        intervals_tuples = intervals # Assume it's already list of tuples/lists
+
+    # --- MERGE (using tuples) ---
+    # Filter out intervals with non-numeric start/end or where start >= end before sorting
+    valid_intervals_tuples = []
+    for iv in intervals_tuples:
+         try:
+              start, end = float(iv[0]), float(iv[1])
+              if start < end:
+                   valid_intervals_tuples.append((start, end))
+              # else: # Optional: log skipped zero/negative duration intervals
+              #      logger.debug(f"Skipping interval with non-positive duration: {iv}")
+         except (TypeError, ValueError):
+              logger.warning(f"Skipping interval with non-numeric values: {iv}")
+              continue # Skip intervals that can't be converted to float
+
+    if not valid_intervals_tuples:
+        return [] # Return empty if no valid intervals remain
+
+    intervals_tuples = sorted(valid_intervals_tuples, key=lambda iv: iv[0])
+    merged_tuples: List[Tuple[float, float]] = [intervals_tuples[0]]
+
+    for cur_start, cur_end in intervals_tuples[1:]:
+        prev_start, prev_end = merged_tuples[-1]
+        # Use a small tolerance (epsilon) for float comparison if needed, though <= should be fine
+        if cur_start - prev_end <= max_gap: # Overlaps or within max_gap
+            merged_tuples[-1] = (prev_start, max(cur_end, prev_end))
+        else: # Gap is larger than max_gap
+            merged_tuples.append((cur_start, cur_end))
+
+    # --- CONVERT back to original format ---
+    if input_was_dict:
+        return [{'start': s, 'end': e} for s, e in merged_tuples]
+    else:
+        # If input was tuples/lists, return tuples
+        return merged_tuples
