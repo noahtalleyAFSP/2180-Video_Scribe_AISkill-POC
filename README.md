@@ -113,24 +113,33 @@ python analyze_video.py my_video.mp4 --output-dir ./my_video_output --fps 1.0 --
 
 ### Custom List Format
 
-Custom lists help guide the LLM. Example (`actions.json`):
+Custom lists (e.g., for persons, objects, actions) allow providing domain-specific guidance to the LLM. The tool expects a JSON file containing:
+1.  A top-level key matching the list type (e.g., `"actions"`, `"persons"`, `"objects"`). The value should be an array of objects.
+2.  *(Optional but Recommended)* A top-level key named `"instructions"` containing a string of text. **This `instructions` text is the primary mechanism currently used to customize the LLM's behavior for tag generation.** It is directly injected into the system prompt for identifying persons, actions, and objects.
+3.  Each object within the array (e.g., under `"actions"`) typically contains:
+    *   A key for the item's name (e.g., `"name"` or `"label"` - the exact key name used here is **not** currently critical for prompt generation, although `"name"` aligns with the final output structure).
+    *   A `"description"` key.
+
+**Important:** While the structure including item names (`name`/`label`) and `description` is loaded, the current implementation for tag generation **only explicitly uses the top-level `"instructions"` string** in the prompt. The individual item `name`/`label` and `description` fields are **not** currently formatted into the tag generation prompts. They serve primarily as user reference or may provide *implicit* context if the `label` names are common terms the LLM recognizes.
+
+Example (`actions.json`):
 
 ```json
 {
-  "actions": [
+  "actions": [ // Top-level key matching list type
     {
-      "name": "Typing",
-      "description": "Person using a keyboard."
+      "name": "Typing", // Item name (key doesn't strictly matter for prompt, 'name' matches output)
+      "description": "Person using a keyboard." // Description (currently not used in prompt)
     },
     {
       "name": "Presenting",
       "description": "Person speaking to an audience, possibly using slides or gestures."
     }
   ],
+  // This is the key currently used for explicit prompt guidance for tags:
   "instructions": "Focus on identifying professional actions in an office setting."
 }
 ```
-The `instructions` key is used directly in the prompt sent to the LLM for tag generation.
 
 ## Output Structure
 
