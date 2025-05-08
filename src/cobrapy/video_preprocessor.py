@@ -3,7 +3,7 @@ import time
 import math
 import numpy as np
 import psutil
-from typing import Union, Type, Optional, List, Tuple, Dict, Set
+from typing import Union, Type, Optional, List, Tuple
 
 import concurrent.futures
 import requests
@@ -36,7 +36,6 @@ from .cobra_utils import (
     prepare_outputs_directory,
     upload_blob,
     generate_batch_transcript,
-    validate_video_manifest
 )
 
 # --- ADDED: Helper function for dominant color extraction ---
@@ -130,96 +129,10 @@ def _get_dominant_colors(image_path: str, num_colors: int = 5, resize_width: int
 class VideoPreProcessor:
     # take either a video manifest object or a path to a video manifest file
     def __init__(
-        self,
-        video_manifest: Union[str, VideoManifest],
-        env: CobraEnvironment,
-        person_group_id: Optional[str] = None,
-        # REMOVE LIST PATH ARGUMENTS - Not needed for preprocessing
-        # peoples_list_path: Optional[str] = None,
-        # emotions_list_path: Optional[str] = None, # Assuming these keep the old list format for now
-        # objects_list_path: Optional[str] = None,
-        # themes_list_path: Optional[str] = None,   # Assuming these keep the old list format for now
-        # actions_list_path: Optional[str] = None,
+        self, video_manifest: Union[str, VideoManifest], env: CobraEnvironment
     ):
-        # ------------------------------------------------------------
-        # 0 · boiler-plate / basic fields
-        # ------------------------------------------------------------
-        self.manifest = validate_video_manifest(video_manifest)
+        self.manifest = video_manifest
         self.env = env
-        self.person_group_id = person_group_id
-
-        # ------------------------------------------------------------
-        # 1 · load the optional lookup files & instructions
-        # ------------------------------------------------------------
-        # Load the map (label->description) and instructions
-        # self.persons_map, self.persons_instructions = self._load_json_list(peoples_list_path, "persons")
-        # self.actions_map, self.actions_instructions = self._load_json_list(actions_list_path, "actions")
-        # self.objects_map, self.objects_instructions = self._load_json_list(objects_list_path, "objects")
-
-        # # Assuming emotions and themes still use the old list format for now
-        # # Adjust if their format also changes
-        # self.emotions_list, _ = self._load_json_list(emotions_list_path, "emotions") # Ignore instructions for list format
-        # self.themes_list, _   = self._load_json_list(themes_list_path,   "themes")   # Ignore instructions for list format
-
-        # # ------------------------------------------------------------
-        # # 2 · Populate known label sets AND prepare data for prompts
-        # # ------------------------------------------------------------
-
-        # # --- Persons ---
-        # self._current_known_persons: Set[str] = set(self.persons_map.keys()) if self.persons_map else set()
-        # self._persons_for_prompt: List[Dict[str, str]] = [
-        #     {"label": label, "description": desc}
-        #     for label, desc in self.persons_map.items()
-        # ] if self.persons_map else []
-
-        # # --- Actions ---
-        # self._current_known_actions: Set[str] = set(self.actions_map.keys()) if self.actions_map else set()
-        # self._actions_for_prompt: List[Dict[str, str]] = [
-        #     {"label": label, "description": desc}
-        #     for label, desc in self.actions_map.items()
-        # ] if self.actions_map else []
-
-        # # --- Objects ---
-        # self._current_known_objects: Set[str] = set(self.objects_map.keys()) if self.objects_map else set()
-        # self._objects_for_prompt: List[Dict[str, str]] = [
-        #     {"label": label, "description": desc}
-        #     for label, desc in self.objects_map.items()
-        # ] if self.objects_map else []
-
-        # # --- Emotions (Assuming old format) ---
-        # self._current_known_emotions: Set[str] = {
-        #     item["label"].strip()
-        #     for item in self.emotions_list.get("emotions", [])
-        #     if isinstance(item, dict) and isinstance(item.get("label"), str)
-        # } if isinstance(self.emotions_list, dict) else set()
-        # # Store for prompt if needed, adjust if format changed
-        # self._emotions_for_prompt: List[Dict[str, str]] = self.emotions_list.get("emotions", []) if isinstance(self.emotions_list, dict) else []
-
-
-        # # --- Themes (Assuming old format) ---
-        # self._current_known_themes: Set[str] = {
-        #      item["label"].strip()
-        #      for item in self.themes_list.get("themes", [])
-        #      if isinstance(item, dict) and isinstance(item.get("label"), str)
-        # } if isinstance(self.themes_list, dict) else set()
-        #  # Store for prompt if needed, adjust if format changed
-        # self._themes_for_prompt: List[Dict[str, str]] = self.themes_list.get("themes", []) if isinstance(self.themes_list, dict) else []
-
-
-        # # ------------------------------------------------------------
-        # # 3 · misc bookkeeping
-        # # ------------------------------------------------------------
-        # # REMOVE - Not needed in preprocessor
-        # # self.token_usage: Dict[str, int]  # declare
-        # # self.token_usage = {"chapters": 0, "tags": 0, "summary": 0, "total": 0}
-
-        # # quick sanity-check (REMOVE)
-        # # print("Loaded persons map:", bool(self.persons_map))
-        # # print("Loaded actions map:", bool(self.actions_map))
-        # # print("Loaded objects map:", bool(self.objects_map))
-        # # print("Known persons:", self._current_known_persons)
-        # # print("Known actions:", self._current_known_actions)
-        # # print("Known objects:", self._current_known_objects)
 
     def preprocess_video(
         self,
@@ -435,6 +348,7 @@ class VideoPreProcessor:
                 segment.number_of_frames = min_list_length # Update frame count
 
 
+        write_video_manifest(self.manifest)
         return self.manifest.video_manifest_path
 
     def _generate_segments(self, scene_list: Optional[List[Tuple[float, float]]] = None):

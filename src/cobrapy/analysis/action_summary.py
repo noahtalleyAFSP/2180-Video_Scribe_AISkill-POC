@@ -3,15 +3,8 @@ from typing import Dict, Any, List, ClassVar, Optional
 from collections import defaultdict
 import os
 from datetime import datetime, timezone
-from ..cobra_utils import seconds_to_iso8601_duration, merge_overlapping, convert_string_to_seconds
+from ..cobra_utils import seconds_to_iso8601_duration
 import json
-from openai import AzureOpenAI, AsyncAzureOpenAI
-from openai.types.chat import ChatCompletionMessageParam, ChatCompletionUserMessageParam, ChatCompletionSystemMessageParam
-from openai.types.chat.completion_create_params import ResponseFormat
-from time import perf_counter
-from openai.types import Completion
-from ..models.video import VideoManifest, Segment
-from ..models.environment import CobraEnvironment
 
 class ActionSummary(AnalysisConfig):
     """
@@ -82,26 +75,16 @@ class ActionSummary(AnalysisConfig):
     # -----------------------------------------------------------------------
 
     system_prompt_chapters: ClassVar[str] = (
-        """You are VideoAnalyzerGPT, analyzing basketball game footage like a **sports commentator**. Your goal is to generate a single, detailed description for the provided time range, using precise timestamps based *only* on the frame data provided. Focus on the play-by-play action, player movements, and game situation.
-
-**GAME CONTEXT:**
-*   **Teams:** Cleveland Cavaliers (Cavs) vs. Miami Heat.
-*   **Jersey Colors:** Cavs are wearing **RED/MAROON** jerseys. Heat are wearing **WHITE** jerseys.
-*   **IMPORTANT:** When describing players, use their team affiliation (e.g., "Heat player", "Cavaliers player") or their specific name if known, rather than just the jersey color.
-
-**CONTEXT - AVAILABLE TAGS:**
-*   **Recognized Persons/Roles:** {person_labels_list}
-*   **Recognized Actions:** {action_labels_list}
-*   **Refer to these specific player and action labels** whenever possible for accuracy and consistency (e.g., use 'Tyler Hero' if identified, not just 'Heat player').
+        """You are VideoAnalyzerGPT, focused on describing video content within specific time ranges. Your goal is to generate a single, detailed description for the provided time range, using precise timestamps based *only* on the frame data provided.
 
 **CRITICAL INSTRUCTIONS - READ CAREFULLY:**
 
 1.  **JSON STRUCTURE:** You MUST return a valid JSON object with ONLY the top-level key: "chapters".
     *   "chapters": An array containing EXACTLY ONE chapter object describing the content within the specified time range. **DO NOT include a "globalTags" key.**
 
-2.  **SHOT ANALYSIS:** Within the chapter object, include:
-    *   `shotType`: Classify the dominant camera shot types observed during this segment (e.g., Wide Shot, Close-Up on player). Provide this as a **LIST of strings**. Choose **one or more** from the following list: {shot_types_list}. If the shot changes, include all relevant types observed.
-    *   `shotDescription`: Describe the shot's composition (players, court position, background), visual style, and any noticeable camera movement (e.g., Tracking player, Zoom on basket).
+2.  **SHOT ANALYSIS (NEW):** Within the chapter object, include:
+    *   `shotType`: Classify the dominant camera shot types observed during this segment. Provide this as a **LIST of strings**. Choose **one or more** from the following list: {shot_types_list}. If the shot changes (e.g., zoom, dolly), include all relevant types observed.
+    *   `shotDescription`: Describe the shot's composition (people, setting), visual style/grading (e.g., cinematic, noir, vibrant), and any noticeable camera movement (e.g., Dolly In/Out, Track In/Out, Zoom In/Out, Crane Up/Down).
 
 3.  **EXACT OUTPUT FORMAT:** Use the *actual start and end times* for this segment (`{start_time}s` to `{end_time}s`) in the `start` and `end` fields of your JSON output.
     ```json
@@ -111,11 +94,11 @@ class ActionSummary(AnalysisConfig):
           "start": "{start_time}s",
           "end": "{end_time}s",
           "shotType": ["Medium Shot (MS)", "Close Up (CU)"],
-          "shotDescription": "Medium shot follows the Heat player dribbling up court, zooms in for a close-up as #14 Tyler Herro attempts a layup...", // Use team/specific names
-          "sentiment": "neutral", // e.g., exciting, tense, routine
-          "emotions": [], // Observed player emotions (e.g., frustration, celebration)
-          "theme": "e.g., Fast break, Defensive stand, Timeout discussion",
-          "summary": "Detailed, play-by-play summary using commentator language and specific labels (e.g., 'Cavaliers' #3 Caris LeVert passes to #31 Jarrett Allen who goes for a slam dunk')..." // Use team/specific names
+          "shotDescription": "Starts as Medium Shot, zooms into Close Up on the character's reaction...",
+          "sentiment": "neutral",
+          "emotions": ["emotion1", "emotion2"],
+          "theme": "short theme",
+          "summary": "Detailed, descriptive summary of the video content..."
         }}
       ]
     }}
@@ -125,35 +108,56 @@ class ActionSummary(AnalysisConfig):
     *   Use the absolute start ({start_time}s) and end ({end_time}s) times provided for the current time range.
     *   Format: "0.000s".
 
-5.  **COMMENTARY SUMMARY CONTENT:** Describe the setting (arena, court position), visuals, key player actions (using specific labels like 'dribbling', 'passing', 'shooting', 'slam dunk' from the list above), and identify players using their specific labels (e.g., '#14 Tyler Herro', 'Referee') or team affiliation (Heat/Cavaliers) whenever possible. Mention relevant audio context (crowd noise, whistles). **Speak like a sports commentator.** Focus entirely on *what is happening in the game*. Interweave information from the images and transcription. **Base your entire description *only* on the provided frame images and transcription text. DO NOT invent details.** Avoid meta-commentary like "in this segment".
+5.  **SUMMARY CONTENT:** Describe the setting, visuals, actions, and relevant audio context occurring *during this specific time range* ({start_time}s to {end_time}s). Focus entirely on *what is happening in the video content*. It is imperative that this information is accurate, detailed, and verbose. Interweave information from the images and transcription provided to give a full picture of the video during this time. **Avoid using phrases like "in this segment", "this clip", or referring to the analysis process itself.**
++ **IMPORTANT: Base your entire description *only* on the provided frame images and transcription text for this specific time range. DO NOT invent details, characters, settings, or events not directly observable in the input.**
 """
     )
 
     # -----------------------------------------------------------------------
-    # System Prompt - Combined Tags (Persons & Actions)
+    # System Prompt - Tags Only (Unified - Handles Custom or Default Instructions)
     # -----------------------------------------------------------------------
-    system_prompt_tags: ClassVar[str] = (
-"""You are VideoAnalyzerGPT, tagging basketball footage. **Use ONLY the labels provided.**
-**If no jersey number is 100 % readable in a frame, return an empty `persons` array.**Output MUST be a JSON object with ONLY "persons" and "actions" top-level keys:
+    system_prompt_tags: ClassVar[str] =  (
+    """You are VideoTaggerGPT, a specialist analysis agent. Your task is to identify and tag entities in video frames based on the provided criteria. It is imperative that you return all persons, objects, and actions in the given frames you are provided with as I have a disability that makes it impossible for me to view the video and only this JSON response.
+Input (in the user message) will contain:
+- segment_start, segment_end ("X.XXXs" format)
+- frame_timestamps: A JSON map like {{ "1": "T1.XXXs", "2": "T2.XXXs", ... }}
+- A sequence of Images referenced by ID (e.g., "Image #1", "Image #2").
 
+Output MUST be **only** valid JSON matching this structure:
 ```json
-{
-  "persons": [ { "name": str, "timecodes": [ { "start": "X.XXXs", "end": "Y.YYYs" } ] } ],
-  "actions": [ { "name": str, "timecodes": [ { "start": "X.XXXs", "end": "Y.YYYs" } ] } ]
-}
+{{
+  "globalTags": {{
+    "persons": [ {{ "name": "...", "timecodes": [{{"start": "...", "end": "..."}}] }} ],
+    "objects": [ {{ "name": "...", "timecodes": [{{"start": "...", "end": "..."}}] }} ],
+    "actions": [ {{ "name": "...", "timecodes": [{{"start": "...", "end": "..."}}] }} ]
+  }}
+}}
 ```
 
-**TIMING SOURCE:** Use ONLY the `frame_timestamps` array (provided in the Frame data JSON) for your `start` / `end` fields.
-- Adhere strictly to the allowed labels listed in the user message.
-- Use timestamps EXACTLY as provided in the frame data (`"X.XXXs"`).
-- Group consecutive frames (gap ≤ 0.25 s) into one timecode entry; otherwise
-- output distinct intervals even if they are only a single frame long.
-**VISUAL vs AUDIO CUES for SCORING PLAYS**
-* **Never infer time from the score graphic.**
-- For "persons": Only tag players if Rules 1-3 (see user JSON) all pass in a frame.
-- If visible in just one frame, set `"start"` = `"end"` = that frame’s timestamp.
-- For "actions": Only tag actions clearly visible AND listed in the allowed list.
-- **DO NOT GUESS. DO NOT USE LABELS NOT PROVIDED.**
+**CRITICAL TAGGING INSTRUCTIONS:**
+
+**Persons:**
+{person_instructions}
+
+**Objects:**
+{object_instructions}
+
+**Actions:**
+{action_instructions}
+
+ **CRITICAL TAGGING INSTRUCTIONS:**
+    …
+    Example: If 'person A' is first seen in Image #2 (timestamp 3.500s) and last seen in Image #5 (timestamp 6.500s), the timecode is `{{"start": "3.500s", "end": "6.500s"}}`. If they reappear in Image #8 (9.500s), create a new entry.
+
+**The following rules are critical to the success of the job:**
+**Timestamp Rules:**
+- Use the provided `frame_timestamps` map to determine `start`/`end` times (format "X.XXXs"). The `start` time is the timestamp of the **first frame** the item is clearly visible in the provided images, and the `end` time is the timestamp of the **last frame** it is clearly visible.
+- **CRITICAL: DO NOT use the overall `segment_start` and `segment_end` values for the tag timecodes.** Use ONLY the timestamps corresponding to the frames where the entity is visible.
+- If an item appears in consecutive frames, merge into one timecode interval spanning its appearance.
+- If an item disappears and reappears later within the provided frames, create separate timecode entries for each appearance.
+- All timecodes must be strictly within the range covered by the provided `frame_timestamps`.
+
+FINAL CHECK: Ensure your output is **only** the valid JSON structure specified above, with `start` and `end` times accurately reflecting the **frame timestamps** where entities are visible. Use empty arrays if no items are identified for a category.
 """
     )
 
@@ -191,6 +195,7 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
         "globalTags": {
             "persons": [],
             "actions": [],
+            "objects": []
         }
     }
 
@@ -205,24 +210,23 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
 
     # The prompt used for the final summary across the entire video
     summary_prompt:  ClassVar[str] = (
-        """Analyze the complete basketball video analysis results (chapters and tags) provided below.
-        Your task is to generate TWO summaries and classify the video content, returning them ONLY as a single JSON object. **Write like a sports commentator.**
+        """Analyze the complete video analysis results (chapters and tags) provided below to understand the video's content.
+        Your task is to generate TWO summaries and return them ONLY as a single JSON object.
 
-        Classification:
-        *   `category`: Choose the **single most appropriate** category for the entire video from this list: {asset_categories_list}. (Likely 'Sports' for basketball).
-        *   `subCategory`: Provide a specific basketball-related sub-category (e.g., 'NBA Highlights', 'College Game Analysis', 'Player Profile', 'Skills Tutorial'). **DO NOT invent a sub-category if one isn't clear.** Leave it as `null` or omit the key if unsure.
+        Additionally, classify the overall video content:
+        *   `category`: Choose the **single most appropriate** category for the entire video from this list: {asset_categories_list}
+        *   `subCategory`: (Optional) If applicable and obvious, provide a specific sub-category (e.g., for 'Sports', maybe 'Basketball Highlights'; for 'News', maybe 'Political Report'). **DO NOT invent a sub-category if one isn't clear.** Leave it as `null` or omit the key if unsure.
 
-        Summaries (Commentator Perspective):
-        1.  **description**: A concise, 1-2 sentence **headline** summarizing the core action or outcome of the video content (e.g., "Highlights of the Cavaliers' narrow victory over the Heat, sealed by a last-second shot.").
-        2.  **summary**: A detailed **game recap** or analysis that captures the key narrative, main players involved, significant plays (shots, passes, dunks, blocks), and overall flow. Mention key stats or moments if available in the tags/chapters. **The summary should be {summary_length_instruction}**
+        1.  **description**: A very concise, 1-2 sentence description summarizing the absolute core gist or main topic of the video content. Focus on what the video is primarily *about*. Avoid listing specific details unless essential for the core topic.
+        2.  **summary**: A detailed summary that captures the key narrative, main participants, significant actions, and important objects across all segments. Focus on the overall flow and major themes rather than segment-by-segment details. **The summary should be {summary_length_instruction}**
 
         CRITICAL: You MUST return ONLY a valid JSON object containing `description`, `summary`, `category`, and optionally `subCategory`. Example format:
         ```json
         {{
           "category": "Sports",
-          "subCategory": "NBA Highlights",
-          "description": "Exciting highlights from the Lakers vs Celtics game, featuring dominant performances...",
-          "summary": "The detailed game recap from a commentator's view..."
+          "subCategory": "Basketball Highlights",
+          "description": "A 1-2 sentence description...",
+          "summary": "The detailed summary..."
         }}
         ```
         Do not include any text outside of this JSON structure."""
@@ -232,6 +236,7 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
     # We will use instance-level tracking in VideoAnalyzer for prompting
     known_tags: ClassVar[Dict[str, set]] = {
         "persons": set(),
+        "objects": set(),
         "actions": set()
     }
 
@@ -301,7 +306,11 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
             processed_segments = []
 
             # Reconstruct full transcript text
-            full_transcript_text = get_full_transcript_text(phrases)
+            full_transcript_text = " ".join(
+                phrase.get("nBest", [{}])[0].get("display", "")
+                for phrase in phrases
+                if phrase.get("nBest")
+            ).strip()
 
             # --- 1b. Process Each Segment (Phrase) ---
             for idx, phrase in enumerate(phrases):
@@ -319,8 +328,7 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
                     end_sec = start_sec + (duration_ticks / 10_000_000.0)
                     duration_sec_segment = duration_ticks / 10_000_000.0
 
-                    # --- FIX: Convert transcript segment tuple to dict --- 
-                    segment_dict = {
+                    processed_segments.append({
                         "segmentId": idx + 1,
                         "speaker": f"Speaker_{phrase.get('speaker')}" if phrase.get('speaker') is not None else "Unknown Speaker",
                         "startSec": round(start_sec, 3),
@@ -334,9 +342,7 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
                         "offsetInTicks": offset_ticks,
                         "durationInTicks": duration_ticks,
                         "duration": seconds_to_iso8601_duration(duration_sec_segment)
-                    }
-                    processed_segments.append(segment_dict)
-                    # --- END FIX ---
+                    })
                 except (ValueError, TypeError, IndexError, KeyError) as e:
                     print(f"WARNING: Skipping transcription phrase due to processing error: {e}. Data: {phrase}")
 
@@ -362,362 +368,219 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
             transcription_details = None
 
         # --- 2. Collect Pre-merged Tags and Chapters for actionSummary ---
-        collected_intervals_by_tag: Dict[str, Dict[str, List[Dict]]] = {
-            "persons": {},
-            "actions": {},
+        # Use defaultdict(list) to directly collect interval dicts
+        collected_intervals_by_tag = {
+            "persons": defaultdict(list),
+            "objects": defaultdict(list),
+            "actions": defaultdict(list)
         }
-        all_chapters = []
-        scoreboard_event_count = 0 # Initialize counter
+        chapters = []
+        all_frame_paths = set()
 
-        for i, container in enumerate(enriched_segment_results): # Use enumerate to get index 'i'
-             # --- Get analysis result (handle both keys) ---
-             analysis_result = (container.get("analysisResult")
-                                or container.get("analysis_result")
-                                or {})
+        # Build a map for quick segment lookup by name (or start/end if name unreliable)
+        segment_map = {seg.segment_name: seg for seg in manifest.segments if seg.segment_name}
 
-             # --- ADDED DEBUG LOG ---
-             print(f"DEBUG Process Seg {i}: analysis_result keys: {list(analysis_result.keys())}")
-             print(f"DEBUG Process Seg {i}: globalTags content: {analysis_result.get('globalTags')}")
-             # --- END ADDED DEBUG LOG ---
+        for i, result_container in enumerate(enriched_segment_results):
+            if not isinstance(result_container, dict): continue
+            analysis_result = result_container.get("analysisResult")
+            segment_name = result_container.get("segmentName", f"segment_{i}")
+            segment_start = result_container.get("startTime")
+            segment_end = result_container.get("endTime")
 
-             if not isinstance(container, dict) or not isinstance(analysis_result, dict):
-                 print(f"DEBUG: Skipping container {i} due to missing/invalid structure or analysisResult.")
-                 continue
+            # Find the corresponding original segment for color data
+            original_segment = segment_map.get(segment_name)
+            # Fallback lookup if name isn't unique/present (less reliable)
+            if not original_segment and segment_start is not None and segment_end is not None:
+                for seg in manifest.segments:
+                    # Use a small tolerance for float comparison
+                    if abs(seg.start_time - segment_start) < 0.001 and abs(seg.end_time - segment_end) < 0.001:
+                        original_segment = seg
+                        break
 
-             # --- Try to get the corresponding segment for start time ---
-             current_segment: Optional["Segment"] = None
-             segment_start_time = 0.0
-             try:
-                 # Assuming index 'i' corresponds to the segment index in the manifest
-                 if manifest and manifest.segments and i < len(manifest.segments):
-                      current_segment = manifest.segments[i]
-                      segment_start_time = current_segment.start_time if current_segment.start_time is not None else 0.0
-                 else:
-                      print(f"Warning: Could not reliably get segment start time for container {i}. Using 0.0s fallback.")
-             except (IndexError, TypeError, AttributeError) as e:
-                 print(f"Warning: Error getting segment start time for container {i}: {e}. Using 0.0s fallback.")
+            segment_colors = original_segment.dominant_colors_hex if original_segment and hasattr(original_segment, 'dominant_colors_hex') else []
+
+            segment_frame_paths = result_container.get("framePaths", [])
+            if isinstance(segment_frame_paths, list): all_frame_paths.update(segment_frame_paths)
+            if analysis_result is None or segment_start is None or segment_end is None: continue
+            if not isinstance(analysis_result, dict): continue
+
+            # --- Process Chapters (validation logic remains) ---
+            raw_chapters = analysis_result.get("chapters", [])
+            if isinstance(raw_chapters, dict): raw_chapters = [raw_chapters]
+            if isinstance(raw_chapters, list):
+                 for chapter in raw_chapters:
+                    if not isinstance(chapter, dict): continue
+                    # --- ADDED: Ensure new shot keys exist, default to empty/null if not ---
+                    if not isinstance(chapter.get("shotType"), list):
+                        chapter["shotType"] = []
+                    if "shotDescription" not in chapter: chapter["shotDescription"] = ""
+                    # --- ADDED: Add dominant colors ---
+                    chapter["dominantColorsHex"] = segment_colors if segment_colors else []
+                    # --- END ADDED ---
+                    is_chapter_valid = True
+                    for time_field in ["start", "end"]:
+                         original_time_str = chapter.get(time_field)
+                         if original_time_str is None: continue
+                         try:
+                             time_str = str(original_time_str).rstrip('s'); time_val = float(time_str); original_val = time_val
+                             # Clamp chapter times to segment boundaries if they exceed them
+                             clamped_time_val = max(segment_start, min(segment_end, time_val))
+                             # Only rewrite if clamping occurred OR format is wrong
+                             if abs(clamped_time_val - original_val) > 0.0001 or not str(original_time_str).endswith('s') or len(time_str.split('.')[-1]) != 3:
+                                 chapter[time_field] = f"{clamped_time_val:.3f}s"
+                             else: # Preserve original formatting if valid and within bounds
+                                 chapter[time_field] = f"{original_val:.3f}s"
+                         except (ValueError, TypeError) as e: is_chapter_valid = False; print(f"WARN: Invalid chapter time {time_field}={original_time_str}"); break
+                    if is_chapter_valid and "start" in chapter and "end" in chapter:
+                         try:
+                             start_f = float(str(chapter["start"]).rstrip('s')); end_f = float(str(chapter["end"]).rstrip('s'))
+                             if start_f > end_f: chapter["start"] = chapter["end"] # Ensure start <= end
+                         except (ValueError, TypeError): is_chapter_valid = False; print(f"WARN: Could not compare chapter start/end")
+                    if is_chapter_valid: chapters.append(chapter)
 
 
-             # --- Collect chapters ---
-             chapters = analysis_result.get("chapters", [])
-             if isinstance(chapters, list):
-                 all_chapters.extend(chap for chap in chapters if isinstance(chap, dict))
-             elif isinstance(chapters, dict):
-                 all_chapters.append(chapters)
+            # --- Collect Pre-merged Tags ---
+            global_tags_segment = analysis_result.get("globalTags", {})
+            if not isinstance(global_tags_segment, dict): continue
 
-             # --- Collect Global Tags (Persons, Actions from LLM) ---
-             global_tags_segment = analysis_result.get("globalTags", {})
-             if isinstance(global_tags_segment, dict):
-                 for tag_type in ["persons", "actions"]:
-                     if tag_type not in global_tags_segment or not isinstance(global_tags_segment[tag_type], list):
-                         # Ensure the key exists even if empty, prevents key errors later
-                         if tag_type not in collected_intervals_by_tag:
-                             collected_intervals_by_tag[tag_type] = {}
-                         continue
+            for tag_type in ["persons", "actions", "objects"]:
+                 if tag_type not in global_tags_segment or not isinstance(global_tags_segment[tag_type], list): continue
+                 for item in global_tags_segment[tag_type]:
+                     if not isinstance(item, dict): continue
+                     item_name = item.get("name"); timecodes = item.get("timecodes", []) # timecodes is List[Dict]
+                     # Basic validation
+                     if not item_name or not isinstance(item_name, str) or not item_name.strip() or not isinstance(timecodes, list): continue
 
-                     for tag_entry in global_tags_segment[tag_type]:
-                         if isinstance(tag_entry, dict) and "name" in tag_entry and isinstance(tag_entry.get("timecodes"), list):
-                             tag_name = tag_entry["name"]
-                             # Initialize list for this tag_name if not present
-                             if tag_name not in collected_intervals_by_tag[tag_type]:
-                                 collected_intervals_by_tag[tag_type][tag_name] = []
+                     tag_name_to_aggregate = item_name.strip()
+                     if not tag_name_to_aggregate: continue
 
-                             for interval in tag_entry["timecodes"]:
-                                 if isinstance(interval, dict) and "start" in interval and "end" in interval:
-                                     try:
-                                         # --- MODIFIED: Ensure using cobra_utils function ---
-                                         # The import `from ..cobra_utils import ... convert_string_to_seconds` handles this.
-                                         # No change needed here if import is correct.
-                                         start_sec = convert_string_to_seconds(interval["start"])
-                                         end_sec = convert_string_to_seconds(interval["end"])
-                                         # --- END MODIFICATION ---
-                                         collected_intervals_by_tag[tag_type][tag_name].append({"start": start_sec, "end": end_sec})
-                                         # print(f"DEBUG: Collected {tag_type} interval for '{tag_name}': {start_sec:.3f}s - {end_sec:.3f}s")
-                                     except ValueError as e:
-                                         # This warning should now only appear for truly unparseable strings
-                                         print(f"Warning: Could not convert timestamps for {tag_type} '{tag_name}': {interval}, Error: {e}")
-                         else:
-                             # Optional: Log if a tag entry is malformed
-                             # print(f"Warning: Malformed tag entry skipped in {tag_type}: {tag_entry}")
-                             pass # Skip malformed entries
+                     # Directly extend the list with the interval dicts
+                     valid_timecode_dicts = [tc for tc in timecodes if isinstance(tc, dict) and "start" in tc and "end" in tc]
+                     if valid_timecode_dicts:
+                         collected_intervals_by_tag[tag_type][tag_name_to_aggregate].extend(valid_timecode_dicts)
+                     # No need to handle floats here anymore
 
-        # --- ADDED DEBUG LOG ---
-        try:
-            # Use json.dumps for potentially large/nested structures
-            collected_intervals_dump = json.dumps(collected_intervals_by_tag, indent=2)
-        except TypeError:
-            collected_intervals_dump = str(collected_intervals_by_tag) # Fallback if not serializable
-        print(f"DEBUG Process Seg - After Collection Loop: collected_intervals_by_tag = {collected_intervals_dump}")
-        # --- END ADDED DEBUG LOG ---
+        # --- 3. Perform Final Merge Across All Segments ---
+        final_tags_structure = {"persons": [], "actions": [], "objects": []}
+        # Access the VideoAnalyzer instance's merge helper via self if ActionSummary is used within it
+        # Or assume merge functions are available in scope
+        from ..video_analyzer import VideoAnalyzer # Or adjust import as needed
 
-        # --- 3. Perform Final Merge and Format Output ---
-        print("DEBUG: Starting final merge and formatting...")
-        merged_action_summary_tags = {
-            "persons": [],
-            "actions": [],
-            # "objects": [] # Assuming objects might be added later or aren't used currently
+        for tag_type, names_dict in collected_intervals_by_tag.items():
+             for name, intervals_list in names_dict.items():
+                 # `intervals_list` is now List[Dict[str, float]]
+                 # Normalize to List[List[float]] for merging helper
+                 numeric_intervals = VideoAnalyzer._timecodes_to_intervals(None, intervals_list) # Pass self=None if calling static helper
+                 # Perform the final merge across all collected intervals for this tag name
+                 merged_numeric_intervals = VideoAnalyzer._merge_overlapping(None, numeric_intervals, max_gap=2.0) # Use desired gap
+                 # Convert back to list of dicts
+                 final_timecode_dicts = [
+                     {"start": round(s, 3), "end": round(e, 3)} for s, e in merged_numeric_intervals
+                 ]
+                 if final_timecode_dicts:
+                      final_tags_structure[tag_type].append({
+                          "name": name,
+                          "timecodes": final_timecode_dicts
+                      })
+
+        # Assign the results from the final merge
+        final_person_tags = final_tags_structure["persons"]
+        final_action_tags = final_tags_structure["actions"]
+        final_object_tags = final_tags_structure["objects"]
+
+        # --- 4. Convert Timestamps to Numeric (Helper function handles 'start'/'end' keys) ---
+        # This step remains useful for ensuring final output has numeric values if needed downstream
+        chapters = convert_string_timestamps_to_numeric(chapters)
+        final_person_tags = convert_string_timestamps_to_numeric(final_person_tags)
+        final_action_tags = convert_string_timestamps_to_numeric(final_action_tags)
+        final_object_tags = convert_string_timestamps_to_numeric(final_object_tags)
+
+        # --- 5. Assemble actionSummary Content ---
+        sorted_frame_paths = sorted(list(all_frame_paths))
+        all_tag_names = set()
+        for tag_list in [final_person_tags, final_action_tags, final_object_tags]:
+            for tag_item in tag_list:
+                if isinstance(tag_item, dict) and "name" in tag_item:
+                    tag_name = tag_item["name"]
+                    if isinstance(tag_name, str) and tag_name.strip(): all_tag_names.add(tag_name.strip())
+        tags_list = sorted(list(all_tag_names))
+        tags_string = ", ".join(tags_list)
+
+        # --- Prepare top-level metadata ---
+        top_level_meta = {} # Keep the dictionary for copyright and AI processing
+
+        # --- Add Copyright Info ---
+        if parsed_copyright_info:
+            top_level_meta["copyright"] = parsed_copyright_info
+            print("DEBUG: Added copyright info to actionSummary metadata.")
+
+        # --- Prepare AI Processing block ---
+        ai_processing = {
+             "summarization": {"createdBy": f"llm-summary-{self.name}", "model": env.vision.deployment if env and env.vision else 'N/A', "processedAt": process_start_time_utc.strftime('%Y-%m-%dT%H:%M:%SZ')},
+             "chapterGeneration": {"createdBy": f"llm-chapters-{self.name}", "method": "llm-based", "processedAt": process_start_time_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}
         }
+        top_level_meta["aiProcessing"] = ai_processing
 
-        # --- ADDED: Determine clip end time for filtering ---
-        clip_end = 0.0 # Default
-        if manifest and manifest.segments:
-             try:
-                  # Use the end time of the last segment
-                  clip_end = manifest.segments[-1].end_time if manifest.segments[-1].end_time is not None else 0.0
-                  print(f"DEBUG: Determined clip end time for filtering: {clip_end:.3f}s")
-             except (IndexError, AttributeError, TypeError):
-                  print("Warning: Could not determine clip end time from manifest segments. Using 0.0s.")
-        elif manifest and manifest.source_video and manifest.source_video.duration:
-             clip_end = manifest.source_video.duration
-             print(f"DEBUG: Using source video duration as clip end time for filtering: {clip_end:.3f}s")
-        else:
-             print("Warning: Cannot determine clip end time. Timestamp filtering might be inaccurate.")
-        MAX_DRIFT = 0.5 # seconds
-        # --- END ADDED ---
-
-        for tag_type, tags_dict in collected_intervals_by_tag.items():
-            if tag_type not in merged_action_summary_tags: continue # Skip if tag type isn't expected in final output
-
-            for tag_name, intervals in tags_dict.items():
-                if not intervals: continue # Skip if no intervals collected
-
-                # Sort intervals by start time before merging
-                sorted_intervals = sorted(intervals, key=lambda x: x["start"])
-
-                # Merge overlapping/adjacent intervals
-                merged_intervals = merge_overlapping(sorted_intervals, max_gap=0.1) # Use correct argument name 'max_gap'
-
-                # --- ADDED DEBUG LOG ---
-                print(f"DEBUG Process Seg - Merging '{tag_name}': sorted_intervals = {sorted_intervals}")
-                print(f"DEBUG Process Seg - Merging '{tag_name}': merged_intervals (after merge_overlapping) = {merged_intervals}")
-                # --- END ADDED DEBUG LOG ---
-
-                # --- ADDED: Filter out intervals outside the clip duration ---
-                original_count = len(merged_intervals)
-                merged_intervals = [
-                    iv for iv in merged_intervals
-                    # Check both start and end are within bounds (allow for small drift)
-                    if 0.0 <= iv["start"] <= clip_end + MAX_DRIFT
-                       and 0.0 <= iv["end"] <= clip_end + MAX_DRIFT
-                       # Also ensure start is not nonsensically after end (though merge_overlapping should prevent this)
-                       and iv["start"] <= iv["end"] + MAX_DRIFT
-                ]
-                # --- ADDED DEBUG LOG ---
-                print(f"DEBUG Process Seg - Merging '{tag_name}': merged_intervals (after filter) = {merged_intervals}")
-                # --- END ADDED DEBUG LOG ---
-                filtered_count = original_count - len(merged_intervals)
-                if filtered_count > 0:
-                     print(f"DEBUG: Filtered out {filtered_count} intervals for tag '{tag_name}' exceeding clip end ({clip_end:.3f}s + {MAX_DRIFT}s drift).")
-                # --- END ADDED ---
-
-                # Format for final output ("X.XXXs")
-                formatted_timecodes = [
-                    {"start": f"{iv['start']:.3f}s", "end": f"{iv['end']:.3f}s"}
-                    for iv in merged_intervals
-                ]
-                # --- ADDED DEBUG LOG ---
-                print(f"DEBUG Process Seg - Merging '{tag_name}': formatted_timecodes = {formatted_timecodes}")
-                # --- END ADDED DEBUG LOG ---
-
-                if formatted_timecodes: # Only add if there are valid timecodes after merging
-                     merged_action_summary_tags[tag_type].append({
-                         "name": tag_name,
-                         "timecodes": formatted_timecodes
-                     })
-                     # print(f"DEBUG: Merged {tag_type} '{tag_name}' - {len(formatted_timecodes)} final intervals.")
-
-        # --- ADDED DEBUG LOG ---
-        try:
-            # Use json.dumps for potentially large/nested structures
-            merged_tags_dump = json.dumps(merged_action_summary_tags, indent=2)
-        except TypeError:
-            merged_tags_dump = str(merged_action_summary_tags) # Fallback if not serializable
-        print(f"DEBUG Process Seg - After Merging Loop: merged_action_summary_tags = {merged_tags_dump}")
-        # --- END ADDED DEBUG LOG ---
-
-        # --- 4. Generate Final Summary (Optional) ---
-        final_summary_content = {} # Stores category, subCategory, description, summary from LLM
-        # --- ADDED: Re-extract chapters here to ensure they are included --- 
-        all_chapters = []
-        for container in enriched_segment_results:
-            # --- Modified check for analysisResult key --- 
-            analysis_result = container.get("analysis_result") or container.get("analysisResult") or {}
-            if analysis_result:
-                chapters = analysis_result.get("chapters", [])
-                if isinstance(chapters, list):
-                    all_chapters.extend(chap for chap in chapters if isinstance(chap, dict)) # Ensure only dicts are added
-                elif isinstance(chapters, dict): # Handle case where only one chapter object might be returned directly
-                    all_chapters.append(chapters)
-        # --- END ADDED --- 
-        
-        summary_start_time = perf_counter()
-        if self.run_final_summary:
-            print("DEBUG: Generating final summary...")
-            # Prepare context for final summary prompt
-            # chapters_context was moved outside this block
-            chapters_context_str = json.dumps(all_chapters, indent=2) # Use the collected chapters
-
-            # Extract transcription text if available
-            if full_transcription_obj:
-                full_transcript_text = get_full_transcript_text(full_transcription_obj.get("recognizedPhrases", []))
-            else:
-                full_transcript_text = "Transcription data unavailable."
-
-            # Prepare tags context
-            tags_context = json.dumps(merged_action_summary_tags, indent=2)
-
-            # Format the final prompt
-            summary_prompt_formatted = self.summary_prompt.format(
-                asset_categories_list=", ".join(self.ASSET_CATEGORIES),
-                summary_length_instruction=env.summary_length_instruction # Use env setting
-            )
-
-            # Construct messages for the final summary LLM call
-            final_summary_messages = [
-                SystemMessage(content=summary_prompt_formatted),
-                HumanMessage(content=f"Video Analysis Context:\n\nChapters:\n{chapters_context_str}\n\nTags:\n{tags_context}\n\nFull Transcription:\n{full_transcript_text}\n\nPlease generate the final JSON summary based on all this information.")
-            ]
-
-            try:
-                # Make the LLM call for the final summary (SYNCHRONOUS)
-                # --- Create SYNC LLM client instance dynamically ---
-                if env.get_llm_provider() == "azure":
-                     # Ensure the correct AzureOpenAI (sync) class is imported
-                     from openai import AzureOpenAI # Add sync import if not already present globally
-                     llm_client = AzureOpenAI(
-                         azure_endpoint=env.vision.endpoint,
-                         api_key=env.vision.api_key.get_secret_value(),
-                         api_version=env.vision.api_version
-                     )
-                else: # Assuming default is OpenAI
-                     # Ensure the correct OpenAI (sync) class is imported
-                     from openai import OpenAI # Add sync import if not already present globally
-                     llm_client = OpenAI(api_key=env.vision.api_key.get_secret_value()) # Need base_url if not default OpenAI
-                # --- End Client Creation ---
-
-                # --- Use SYNC call (no await) --- 
-                response = llm_client.chat.completions.create(
-                    model=env.get_llm_model_name(purpose="summary"), # Use appropriate model
-                    messages=[m.to_dict() for m in final_summary_messages],
-                    response_format={"type": "json_object"},
-                    temperature=0.1,
-                    max_tokens=1024
-                )
-                # --- Synchronous clients typically don't need an explicit close --- 
-                # await llm_client.close() # REMOVE await and close call
-                
-                summary_result_raw = response.choices[0].message.content or "" # Ensure it's a string
-                if not summary_result_raw.strip():
-                    print("Warning: Model returned empty content (possibly content-filtered). Using fallback.")
-                    # Provide fallback even if empty
-                    final_summary_content = {
-                        "category": "Unknown",
-                        "subCategory": None,
-                        "description": "Summary unavailable – model returned no content.",
-                        "summary": "-" # Simplified fallback summary
-                    }
-                else:
-                    # Try parsing only if content is not empty
-                    final_summary_content = json.loads(summary_result_raw)
-                    print(f"DEBUG: Final summary generated successfully. ({perf_counter() - summary_start_time:.2f}s)")
-
-            except json.JSONDecodeError as e: # Keep existing JSON error handling
-                print(f"ERROR: Failed to parse JSON from LLM summary response: {e}")
-                print(f"LLM Raw Response (first 500 chars): {summary_result_raw[:500]}")
-                # Provide a fallback empty summary structure
-                final_summary_content = {
-                    "category": "Unknown",
-                    "subCategory": None,
-                    "description": "Summary generation failed (JSON parse error).",
-                    "summary": "Could not generate a detailed summary due to a JSON parsing error."
-                }
-            except Exception as e: # Catch other potential errors during LLM call/processing
-                print(f"ERROR: Failed to generate final summary: {e}")
-                # Provide a fallback empty summary structure
-                final_summary_content = {
-                    "category": "Unknown",
-                    "subCategory": None,
-                    "description": "Summary generation failed.",
-                    "summary": "Could not generate a detailed summary due to an error."
-                }
-        else: # If final summary is skipped
-             final_summary_content = {
-                 "category": "Not Applicable",
-                 "subCategory": None,
-                 "description": "Final summary generation was skipped.",
-                 "summary": "Final summary generation was skipped."
-             }
-
-        # --- 5. Assemble Final Output Structure --- 
-        print("DEBUG: Assembling final output structure...")
-        # Combine merged tags and final summary into action_summary_content
-        action_summary_content = {
-            **final_summary_content, # Add category, subCategory, description, summary
-            "globalTags": merged_action_summary_tags, # Add merged persons, actions
-            "chapters": all_chapters # <-- Ensure chapters are included here
+        # --- Assemble final actionSummary content dictionary ---
+        action_summary_output = {
+            **top_level_meta,
+            "transcript": full_transcript_text,
+            "tagsString": tags_string,
+            "tags": tags_list,
+            "chapter": chapters,
+            "person": final_person_tags,
+            "action": final_action_tags,
+            "object": final_object_tags,
+            "downscaledResolution": manifest.processing_params.downscaled_resolution if manifest and hasattr(manifest, 'processing_params') and hasattr(manifest.processing_params, 'downscaled_resolution') else None,
         }
 
-        # --- 6. Add Metadata --- 
-        process_end_time_utc = datetime.now(timezone.utc)
-        processing_duration_seconds = (process_end_time_utc - process_start_time_utc).total_seconds()
+        # Add runtime and tokens if provided (moved after dict construction)
+        if runtime_seconds is not None:
+            action_summary_output["runtime"] = seconds_to_iso8601_duration(runtime_seconds)
+            action_summary_output["runtimeSeconds"] = round(runtime_seconds, 3)
+        if tokens is not None:
+            action_summary_output["tokens"] = tokens
 
-        metadata = {
-            "processingStartTimeUTC": process_start_time_utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
-            "processingEndTimeUTC": process_end_time_utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
-            "processingDurationSeconds": round(processing_duration_seconds, 3),
-            "runtimeSeconds": round(runtime_seconds, 3) if runtime_seconds is not None else None,
-            "totalTokens": tokens["total"] if tokens else None,
-            "promptTokens": tokens["prompt"] if tokens else None,
-            "completionTokens": tokens["completion"] if tokens else None,
-            "llmProvider": env.get_llm_provider(),
-            "llmModelUsed": env.get_llm_model_name(), # Get default model used across segments
-            "llmSummaryModelUsed": env.get_llm_model_name(purpose="summary") if self.run_final_summary else None,
-            "asrProvider": env.get_asr_provider(),
-            "asrModelUsed": env.get_asr_model_name(),
-            "copyrightInfo": parsed_copyright_info, # Add parsed copyright info
-            "version": "cobrapy-vX.Y.Z" # Replace with actual version later
+        # --- 6. Assemble Final Output Dictionary ---
+        final_output = {
+            "actionSummary": action_summary_output
         }
-        action_summary_content["metadata"] = metadata
-        # Optional: Add manifest details if needed
-        # action_summary_content["sourceManifest"] = manifest.to_dict() if manifest else None
+        if transcription_details:
+            final_output["transcriptionDetails"] = transcription_details
 
-        print(f"DEBUG: action_summary processing complete. ({processing_duration_seconds:.2f}s)")
+        print("DEBUG: process_segment_results finished. Returning dict with actionSummary and potentially transcriptionDetails.")
+        return final_output
 
-        # Return both the detailed transcription and the action summary
-        return {
-            "transcriptionDetails": transcription_details,
-            "actionSummary": action_summary_content,
-        }
-
-# -----------------------------------------------------------------------
-# Helper Functions
-# -----------------------------------------------------------------------
-def get_full_transcript_text(recognized_phrases: List[Dict]) -> str:
-    """Extracts and joins the display text from recognized phrases."""
-    return " ".join(
-        phrase.get("nBest", [{}])[0].get("display", "")
-        for phrase in recognized_phrases
-        if phrase and isinstance(phrase, dict) and phrase.get("nBest")
-    ).strip()
+# --- UPDATED Helper Function for Robust Timestamp Conversion (Keep existing logic) ---
+# Note: This will apply to chapters and tags within actionSummary
+def convert_string_timestamps_to_numeric(data):
+    """Recursively converts 'start'/'end' string values like 'X.XXXs' to numeric floats.
+    If a timecode dictionary is missing a key, logs a warning and sets the missing key to None."""
+    if isinstance(data, dict):
+        is_timecode_dict = 'start' in data or 'end' in data; new_dict = {}
+        for k, v in data.items():
+            if is_timecode_dict and k in ("start", "end"):
+                if isinstance(v, str) and v.endswith('s'):
+                    try: new_dict[k] = round(float(v[:-1]), 3)
+                    except (ValueError, TypeError): new_dict[k] = v
+                elif isinstance(v, (int, float)): new_dict[k] = round(float(v), 3)
+                else: new_dict[k] = v
+            # --- ADDED: Skip conversion for new shot fields ---
+            elif k in ("shotType", "shotDescription"):
+                 new_dict[k] = v # Keep as string
+            # --- END ADDED ---
+            else: new_dict[k] = convert_string_timestamps_to_numeric(v)
+        if is_timecode_dict:
+            if 'start' not in new_dict: new_dict['start'] = None
+            if 'end' not in new_dict: new_dict['end'] = None
+        return new_dict
+    elif isinstance(data, list):
+        processed_list = [convert_string_timestamps_to_numeric(item) for item in data]; return [item for item in processed_list if item is not None]
+    else: return data
+# --- End UPDATED Helper Function ---
 
 # Add explicit type hint for VideoManifest to satisfy the forward reference
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from ..models.video import VideoManifest, Segment
+    from ..models.video import VideoManifest
     from ..models.environment import CobraEnvironment
-
-# Make sure SystemMessage and HumanMessage are defined or imported if used in the summary generation
-# For standard OpenAI library v1.0+
-class SystemMessage:
-    def __init__(self, content: str):
-        self.role = "system"
-        self.content = content
-    def to_dict(self) -> Dict[str, str]:
-        return {"role": self.role, "content": self.content}
-
-class HumanMessage:
-     def __init__(self, content: str):
-        self.role = "user"
-        self.content = content
-     def to_dict(self) -> Dict[str, str]:
-        return {"role": self.role, "content": self.content}

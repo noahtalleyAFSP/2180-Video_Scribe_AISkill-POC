@@ -14,8 +14,9 @@ class Segment(BaseModel):
     segment_prompt_path: Optional[str] = None
     processed: Optional[bool] = False
     analysis_completed: Optional[list] = []
-    analyzed_result: Optional[Dict[str, Any]] = None
+    analyzed_result: Dict[str, Any] = Field(default_factory=dict)
     transcription: Optional[str] = None
+    transcription_segments: List[Dict] = []
     chapter: Optional[dict] = None
     is_speech_based: Optional[bool] = False
     dominant_colors_hex: List[str] = []
