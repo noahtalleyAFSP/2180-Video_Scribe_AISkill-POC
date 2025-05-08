@@ -43,6 +43,7 @@ def analyze_video(
     downscale_to_max_height=None,
     use_scene_detection=False,
     scene_detection_threshold=30.0,
+    max_concurrent_tasks=8,
 ):
     """Analyze a video using frame descriptions and OpenAI.
     
@@ -227,6 +228,7 @@ def analyze_video(
         manifest = analyzer.analyze_video(
             analysis_config=action_summary_instance,
             run_async=run_async,
+            max_concurrent_tasks=max_concurrent_tasks,
             copyright_json_str=copyright_json_str,
             use_scene_detection=use_scene_detection,
             scene_detection_threshold=scene_detection_threshold
