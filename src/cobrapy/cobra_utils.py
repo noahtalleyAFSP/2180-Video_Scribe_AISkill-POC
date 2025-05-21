@@ -62,7 +62,8 @@ def generate_batch_transcript(
     candidate_locales: List[str] = ["en-US"], # Default to English
     enable_diarization: bool = True,
     enable_word_timestamps: bool = True,
-    job_name_prefix: str = "cobra_batch_"
+    job_name_prefix: str = "cobra_batch_",
+    enable_language_identification: bool = False # ADDED: New flag
 ) -> Optional[Dict]:
     """
     Generates transcript using Azure Batch Transcription REST API v3.2.
@@ -71,9 +72,14 @@ def generate_batch_transcript(
         audio_blob_sas_url: SAS URL for the audio file in Azure Blob Storage.
         env: CobraEnvironment containing Speech and Blob Storage config.
         candidate_locales: List of possible languages for identification.
+                           If enable_language_identification is False, the first locale in this list
+                           will be used as the primary transcription language.
         enable_diarization: Whether to enable speaker separation.
         enable_word_timestamps: Whether to request word-level timestamps.
         job_name_prefix: Prefix for the transcription job display name.
+        enable_language_identification: Whether to enable automatic language identification.
+                                        If False, uses the first locale in candidate_locales.
+                                        If True, candidate_locales must contain >= 2 locales.
 
     Returns:
         A dictionary containing the parsed transcription results from the Batch API,
@@ -107,47 +113,52 @@ def generate_batch_transcript(
     if enable_diarization:
          properties["diarizationEnabled"] = True
 
-    # --- Modified Language Identification Logic (v2) ---
+    # --- Modified Language Identification Logic (v3) ---
     if not candidate_locales or len(candidate_locales) < 1:
-         # Should not happen with default, but safety check
-         raise ValueError("At least one candidate locale must be provided for transcription.")
+         raise ValueError("At least one candidate locale must be provided.")
+    base_locale = candidate_locales[0] # Used if LID is off, or as primary for LID
 
-    # Ensure we have a base locale for the 'locale' property
-    base_locale = candidate_locales[0]
+    if enable_language_identification:
+        print(f"DEBUG: Language Identification ENABLED.")
+        id_locales = list(candidate_locales)
+        if len(id_locales) < 2:
+            # Add a default second locale if only one was provided and LID is on
+            default_second_locale = "es-ES"
+            if base_locale.lower() != default_second_locale.lower(): # Avoid adding the same locale twice, case-insensitive
+                id_locales.append(default_second_locale)
+                print(f"DEBUG: Adding '{default_second_locale}' to meet language ID requirement (min 2) because LID is enabled.")
+            else:
+                id_locales.append("en-US" if base_locale.lower() != "en-us" else "fr-FR") # Pick another common one
+                print(f"DEBUG: Adding a different second locale to meet language ID requirement (min 2) because LID is enabled.")
+        
+        if len(id_locales) < 2: # Still less than 2 after attempting to add one
+            raise ValueError("Language Identification is enabled but less than 2 candidate locales were effectively provided.")
 
-    # Prepare the list for languageIdentification - ensure minimum of 2
-    id_locales = list(candidate_locales) # Create a copy
-    if len(id_locales) == 1:
-        # Add a default second locale if only one was provided
-        # Choose a common but distinct language like Spanish
-        default_second_locale = "es-ES"
-        if base_locale != default_second_locale: # Avoid adding the same locale twice
-            id_locales.append(default_second_locale)
-            print(f"DEBUG: Adding '{default_second_locale}' to meet language ID requirement (min 2).")
-        else:
-             # If the base was es-ES, add en-US as the second
-             id_locales.append("en-US")
-             print(f"DEBUG: Adding 'en-US' to meet language ID requirement (min 2).")
-
-
-    # Now, add the languageIdentification property with the adjusted list (>= 2 locales)
-    properties["languageIdentification"] = {
-        "candidateLocales": id_locales
-    }
-    print(f"DEBUG: Requesting language identification with candidates: {id_locales}")
-    # --- End Modified Logic (v2) ---
+        properties["languageIdentification"] = {
+            "candidateLocales": id_locales
+        }
+        # 'locale' field MUST NOT coexist with 'languageIdentification'
+        final_locale_for_payload = None # Will be omitted from payload
+        print(f"DEBUG: Requesting language identification with candidates: {id_locales}")
+    else:
+        print(f"DEBUG: Language Identification DISABLED. Using primary locale: {base_locale}")
+        final_locale_for_payload = base_locale
+        # Ensure languageIdentification is not in properties if LID is off
+        if "languageIdentification" in properties:
+            del properties["languageIdentification"]
+    # --- End Modified Logic (v3) ---
 
 
     payload = {
         "contentUrls": [audio_blob_sas_url],
-        "locale": base_locale, # Required: Primary language guess/target
+        # "locale": base_locale, # REMOVED: Handled by final_locale_for_payload
         "displayName": f"{job_name_prefix}{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
-        "properties": properties, # Now always includes languageIdentification with >= 2 locales
-        # Optional: Specify destinationContainerUrl if you want results in your own blob storage
-        # "destinationContainerUrl": "YOUR_CONTAINER_SAS_URL_WITH_WRITE_PERMISSIONS"
-        # Optional: timeToLive (e.g., "PT12H" for 12 hours) for automatic deletion
-        # "timeToLive": "PT24H"
+        "properties": properties,
     }
+
+    if final_locale_for_payload:
+        payload["locale"] = final_locale_for_payload
+    # --- End Payload Update ---
 
     # --- Submit Transcription Job ---
     print(f"({get_elapsed_time(start_t_batch)}s) Submitting job to {endpoint}...")

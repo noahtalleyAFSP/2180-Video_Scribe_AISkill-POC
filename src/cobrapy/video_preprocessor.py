@@ -149,6 +149,7 @@ class VideoPreProcessor:
         scene_detection_threshold: float = 30.0,
         downscale_to_max_width: int = None,
         downscale_to_max_height: int = None,
+        enable_language_identification: bool = False
     ) -> str:
         start_time = time.time()
         print(
@@ -247,7 +248,10 @@ class VideoPreProcessor:
                 max_workers = min(cpu_count, int(memory // 2))
 
             try:
-                self._extract_audio_and_transcribe(max_workers) # Ensure this function exists and works
+                self._extract_audio_and_transcribe(
+                    max_workers,
+                    enable_language_identification=enable_language_identification
+                )
                 if not self.manifest.audio_transcription:
                      print(f"({get_elapsed_time(start_time)}s) Warning: Batch transcription did not produce results.")
                 else:
@@ -711,7 +715,7 @@ class VideoPreProcessor:
             segment.processed = False
             return index, segment, False, None
 
-    def _extract_audio_and_transcribe(self, max_workers: int):
+    def _extract_audio_and_transcribe(self, max_workers: int, enable_language_identification: bool = False):
          # This method extracts the *full* audio for transcription,
          # which is independent of video segmentation method. No changes needed here.
          # Ensure this method is correctly implemented based on previous discussions.
@@ -764,7 +768,8 @@ class VideoPreProcessor:
              transcript_result = generate_batch_transcript(
                   audio_blob_sas_url=audio_blob_sas_url,
                   env=self.env,
-                  candidate_locales=candidate_locales
+                  candidate_locales=candidate_locales,
+                  enable_language_identification=enable_language_identification
              )
              self.manifest.audio_transcription = transcript_result
              if transcript_result:

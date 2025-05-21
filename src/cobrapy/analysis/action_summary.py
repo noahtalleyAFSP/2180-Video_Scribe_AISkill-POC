@@ -517,7 +517,7 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
         # --- Prepare AI Processing block ---
         ai_processing = {
              "summarization": {"createdBy": f"llm-summary-{self.name}", "model": env.vision.deployment if env and env.vision else 'N/A', "processedAt": process_start_time_utc.strftime('%Y-%m-%dT%H:%M:%SZ')},
-             "chapterGeneration": {"createdBy": f"llm-chapters-{self.name}", "method": "llm-based", "processedAt": process_start_time_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}
+             "chapterGeneration": {"createdBy": f"llm-chapters-{self.name}", "model": env.vision.deployment if env and env.vision else 'N/A', "processedAt": process_start_time_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}
         }
         top_level_meta["aiProcessing"] = ai_processing
 

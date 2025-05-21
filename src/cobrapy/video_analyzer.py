@@ -15,7 +15,55 @@ from string import Formatter
 from azure.storage.blob import BlobServiceClient
 from datetime import datetime
 from .cobra_utils import seconds_to_iso8601_duration # Adjust import path if needed
+import csv # Added for TSV writing
+from urllib.parse import urlparse, urlunparse # Added for URL manipulation
+from PIL import Image # ADDED: For image dimension reading
+from math import ceil # ADDED: For tiles_needed helper
 
+# --- ADDED: Single-tariff constants for GPT-4o/Vision ---
+GPT4O_BASE      = 85      # tokens per image – low‑detail     (also the "base" for high‑detail)
+GPT4O_PER_TILE  = 170     # tokens per 512 × 512 tile – high‑detail
+
+# --- DELETED: Old IMAGE_TOKEN_COST ---
+
+# --- ADDED: Helper for tile calculation ---
+def tiles_needed(w: int, h: int, tile: int = 512) -> int:
+    return ceil(w / tile) * ceil(h / tile)
+
+# --- UPDATED: estimate_image_tokens function ---
+def estimate_image_tokens(messages: list[dict]) -> int:
+    """
+    Reproduce Azure's billing formula for GPT‑4o / GPT‑4 Vision.
+
+        • low‑detail  →  85 tokens flat
+        • high‑detail →  85 + 170 × N_tiles   (N_tiles = ceil(w/512)*ceil(h/512))
+
+    width / height are optional extra keys you attach when you build the
+    prompt. If they are missing we assume one 512² tile.
+    """
+    total = 0
+    for m in messages:
+        content = m.get("content") or []
+        # Ensure content is iterable and treat as list if it's a single dict
+        if isinstance(content, dict): 
+            content = [content]
+        if not isinstance(content, list):
+            continue 
+            
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                img_url_data = part.get("image_url") or {}
+                detail = (img_url_data.get("detail") or "low").lower()
+
+                if detail == "high":
+                    # Use provided width/height, fallback to 512 if missing
+                    w = int(img_url_data.get("width",  512))
+                    h = int(img_url_data.get("height", 512))
+                    total += GPT4O_BASE + GPT4O_PER_TILE * tiles_needed(w, h)
+                else:  # "low" or any other unspecified detail
+                    total += GPT4O_BASE
+    return total
+# --- END UPDATED ---
 
 from .models.video import VideoManifest, Segment
 from .models.environment import CobraEnvironment
@@ -28,6 +76,7 @@ from .cobra_utils import (
     ensure_person_group_exists,
     process_frame_with_faces,
     seconds_to_iso8601_duration,
+    upload_blob, # Ensure upload_blob is imported
 )
 
 logger = logging.getLogger(__name__)
@@ -47,9 +96,21 @@ class VideoAnalyzer:
     themes_list: Optional[dict]
     actions_list_path: Optional[str]
     actions_list: Optional[dict]
+    video_blob_url: Optional[str] # ADDED: Store input video blob URL
     MAX_FRAMES_PER_PROMPT: int = 45  # Maximum number of frames to send in a single prompt
-    token_usage: Dict[str, int]  # Track chapters, tags, summary, total
+    token_usage: Dict[str, int]  # UPDATED structure
     TAG_CHUNK_FRAME_COUNT: int = 5
+    image_detail_level: str = "low" # ADDED: Configurable image detail level
+
+    # Pricing info dictionary (based on user input, with assumptions)
+    PRICING_INFO: Dict[str, Dict[str, float]] = {
+        # NOTE: Image token pricing is NOT specified by the user.
+        # Calculated cost will ONLY reflect text input/output tokens.
+        "gpt-4.1": {"input_per_million": 2.00, "output_per_million": 8.00},
+        "gpt-4.1-mini": {"input_per_million": 0.40, "output_per_million": 1.60},
+        "gpt-4.1-nano": {"input_per_million": 0.10, "output_per_million": 0.40},
+    }
+
 
     # Add instance variables to track known tags during analysis
     _current_known_persons: Set[str]
@@ -61,6 +122,9 @@ class VideoAnalyzer:
         self,
         video_manifest: Union[str, VideoManifest],
         env: CobraEnvironment,
+        # --- ADDED video_blob_url ---
+        video_blob_url: Optional[str] = None,
+        # --- END ADDED ---
         person_group_id: Optional[str] = None,
         peoples_list_path: Optional[str] = None,
         emotions_list_path: Optional[str] = None,
@@ -71,21 +135,24 @@ class VideoAnalyzer:
         # get and validate video manifest
         self.manifest = validate_video_manifest(video_manifest)
         self.env = env
+        # --- ADDED: Store video_blob_url ---
+        self.video_blob_url = video_blob_url
+        # --- END ADDED ---
         self.person_group_id = person_group_id
         self.identified_people_in_segment = {}
-        
+
         # Load peoples list if provided
-        self.peoples_list = self._load_json_list(peoples_list_path, "peoples")
-        
+        self.peoples_list = self._load_json_list(peoples_list_path, "persons") # Corrected key to persons
+
         # Load emotions list if provided
         self.emotions_list = self._load_json_list(emotions_list_path, "emotions")
-        
+
         # Load objects list if provided
         self.objects_list = self._load_json_list(objects_list_path, "objects")
-        
+
         # Load themes list if provided
         self.themes_list = self._load_json_list(themes_list_path, "themes")
-        
+
         # Load actions list if provided
         self.actions_list = self._load_json_list(actions_list_path, "actions")
 
@@ -95,15 +162,35 @@ class VideoAnalyzer:
         self._current_known_objects = set()
 
         # Optionally pre-populate from lists if provided
+        # --- FIX: Use correct key from loaded list data ---
         if self.peoples_list:
-             self._current_known_persons.update(self.peoples_list.get("persons", []))
+             people_items = self.peoples_list.get("persons", []) # Use 'persons' key
+             if isinstance(people_items, list):
+                 self._current_known_persons.update(item.get("label") or item.get("name") for item in people_items if isinstance(item, dict)) # Use label or name
         if self.actions_list:
-             self._current_known_actions.update(self.actions_list.get("actions", []))
+             action_items = self.actions_list.get("actions", [])
+             if isinstance(action_items, list):
+                 self._current_known_actions.update(item.get("label") or item.get("name") for item in action_items if isinstance(item, dict))
         if self.objects_list:
-             self._current_known_objects.update(self.objects_list.get("objects", []))
+             object_items = self.objects_list.get("objects", [])
+             if isinstance(object_items, list):
+                 self._current_known_objects.update(item.get("label") or item.get("name") for item in object_items if isinstance(item, dict))
+        # --- END FIX ---
 
-        # Initialize token usage tracking
-        self.token_usage = {"chapters": 0, "tags": 0, "summary": 0, "total": 0}
+        # --- UPDATED: Initialize detailed token usage tracking ---
+        self.token_usage = {
+            # Detailed breakdown (optional internal use)
+            "chapters_prompt_tokens": 0, "chapters_completion_tokens": 0, "chapters_image_tokens": 0,
+            "tags_prompt_tokens": 0, "tags_completion_tokens": 0, "tags_image_tokens": 0,
+            "summary_prompt_tokens": 0, "summary_completion_tokens": 0,
+
+            # Totals needed for the report
+            "report_input_text_tokens": 0,    # Sum of all prompt_tokens
+            "report_output_text_tokens": 0,   # Sum of all completion_tokens
+            "report_input_image_tokens": 0,   # Sum of all image_tokens
+            "report_total_tokens": 0          # Sum of the three above
+        }
+        # --- END UPDATED ---
 
     def _load_json_list(self, file_path, expected_key):
         """Helper method to load and validate JSON list files."""
@@ -153,8 +240,15 @@ class VideoAnalyzer:
         self.reprocess_segments = reprocess_segments
         self.person_group_id = person_group_id
 
-        # Reset token usage for each run
-        self.token_usage = {"chapters": 0, "tags": 0, "summary": 0, "total": 0}
+        # --- UPDATED: Reset detailed token usage ---
+        self.token_usage = {
+            "chapters_prompt_tokens": 0, "chapters_completion_tokens": 0, "chapters_image_tokens": 0,
+            "tags_prompt_tokens": 0, "tags_completion_tokens": 0, "tags_image_tokens": 0,
+            "summary_prompt_tokens": 0, "summary_completion_tokens": 0,
+            "report_input_text_tokens": 0, "report_output_text_tokens": 0,
+            "report_input_image_tokens": 0, "report_total_tokens": 0
+        }
+        # --- END UPDATED ---
 
         stopwatch_start_time = time.time()
 
@@ -549,6 +643,18 @@ class VideoAnalyzer:
 
         # --- END FIX ---
 
+        # --- ADDED: Generate Summary Report ---
+        try:
+            print("-" * 20)
+            print("Generating Analysis Summary Report...")
+            report_data = self._gather_report_data(final_results, analysis_config.name, elapsed_time, final_results_output_path)
+            self._write_summary_report(report_data)
+            print("Analysis Summary Report generated.")
+            print("-" * 20)
+        except Exception as report_e:
+            print(f"Warning: Failed to generate analysis summary report: {report_e}")
+        # --- END ADDED ---
+
         return final_results
 
     def generate_segment_prompts(self, analysis_config: Type[AnalysisConfig]):
@@ -722,7 +828,7 @@ class VideoAnalyzer:
                 user_content.append(
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}", "detail": "low"},
+                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}", "detail": self.image_detail_level},
                     }
                 )
 
@@ -1378,7 +1484,7 @@ class VideoAnalyzer:
                 if frame_url_or_path.startswith("http"): # Simple check for URL
                      user_content.append({"type": "image_url",
                                           "image_url": {"url": frame_url_or_path,
-                                                        "detail": "low"}}) # Detail low might be sufficient for chapters
+                                                        "detail": self.image_detail_level}})
                 else:
                     # Fallback to base64 if it's a path (shouldn't happen now)
                     print(f"Warning: Frame {idx} for chapter prompt is a path, encoding base64: {frame_url_or_path}")
@@ -1387,7 +1493,7 @@ class VideoAnalyzer:
                          if not b64: continue
                          user_content.append({"type": "image_url",
                                              "image_url": {"url": f"data:image/jpeg;base64,{b64}",
-                                                           "detail": "low"}})
+                                                           "detail": self.image_detail_level}})
                     except Exception as e:
                          print(f"Warning: Error encoding frame path {frame_url_or_path} for chapter prompt: {e}")
                 # --- END MODIFIED ---
@@ -1493,13 +1599,13 @@ class VideoAnalyzer:
                       continue
                  user_content.append({"type": "text", "text": f"\nImage #{frame_id}:"})
                  if frame_url_or_path.startswith("http"):
-                      user_content.append({"type": "image_url", "image_url": {"url": frame_url_or_path, "detail": "low"}})
+                      user_content.append({"type": "image_url", "image_url": {"url": frame_url_or_path, "detail": self.image_detail_level}})
                  else:
                      print(f"Warning: Frame {frame_id} for tag prompt is a path, encoding base64: {frame_url_or_path}")
                      try:
                           b64 = encode_image_base64(frame_url_or_path)
                           if not b64: continue
-                          user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}})
+                          user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": self.image_detail_level}})
                      except Exception as e:
                           print(f"Warning: Error encoding frame path {frame_url_or_path} for tag prompt: {e}")
 
@@ -1723,7 +1829,7 @@ class VideoAnalyzer:
             total_chars = 0
         return total_chars // 4
 
-    def _call_llm(self, messages, images_base64=None, model="gpt-3.5-turbo", log_token_category=None):
+    def _call_llm(self, messages, model="gpt-3.5-turbo", log_token_category=None):
         # Revert to user's original structure for calling Azure/OpenAI models
         # Use AzureOpenAI or AsyncAzureOpenAI clients as before
         # Token logging and counting logic is preserved
@@ -1756,6 +1862,9 @@ class VideoAnalyzer:
             )
         # ---- END SIZE GUARD ----
 
+        # 1️⃣  Estimate image tokens *before* we send the request
+        est_img_tokens = estimate_image_tokens(messages)
+
         response = client.chat.completions.create(
             model=self.env.vision.deployment,
             messages=messages,
@@ -1763,21 +1872,45 @@ class VideoAnalyzer:
             **completion_params
             # --- END EDIT ---
         )
-        # Token counting (prompt, completion, total)
+        
+        # 2️⃣  Normal token bookkeeping as you already do
         prompt_tokens = response.usage.prompt_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'prompt_tokens') else 0
         completion_tokens = response.usage.completion_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'completion_tokens') else 0
         total_tokens = response.usage.total_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'total_tokens') else prompt_tokens + completion_tokens
-        image_tokens = self._count_image_tokens(images_base64) if images_base64 else 0
-        total_with_images = total_tokens + image_tokens
+        
+        # 3️⃣  If Azure did NOT return image_tokens, inject the estimate
+        image_tokens = getattr(response.usage, "image_tokens", None)
+        if image_tokens is None:
+            image_tokens = est_img_tokens          # ← our estimate
+            
+        total_with_images = total_tokens # This is the total from the API response.usage.total_tokens
+
         if log_token_category:
-            self.token_usage[log_token_category] += total_with_images
-            self.token_usage["total"] += total_with_images
-            print(f"[TOKENS] {log_token_category}: prompt={prompt_tokens}, completion={completion_tokens}, images={image_tokens}, total={total_with_images}")
+            # Map generic category → the three detailed counters you already track
+            prompt_key      = f"{log_token_category}_prompt_tokens"
+            completion_key  = f"{log_token_category}_completion_tokens"
+            image_key       = f"{log_token_category}_image_tokens"
+
+            # Ensure the dict has those keys (lets you add new categories without edits elsewhere)
+            for k_init in (prompt_key, completion_key, image_key): # Renamed k to k_init to avoid conflict
+                self.token_usage.setdefault(k_init, 0)
+
+            self.token_usage[prompt_key]     += prompt_tokens
+            self.token_usage[completion_key] += completion_tokens
+            self.token_usage[image_key]      += image_tokens
+
+            # Grand totals used by the final report
+            self.token_usage["report_input_text_tokens"]  += prompt_tokens # prompt_tokens from API includes image tokens
+            self.token_usage["report_output_text_tokens"] += completion_tokens
+            self.token_usage["report_input_image_tokens"] += image_tokens # This is now from API or fallback
+            self.token_usage["report_total_tokens"]       += total_with_images # This is total_tokens from API
+            
+            print(f"[TOKENS] {log_token_category}: prompt={prompt_tokens}, completion={completion_tokens}, images={image_tokens}, total={total_with_images}. Updated detailed and report totals.")
         else:
-            print(f"[TOKENS] prompt={prompt_tokens}, completion={completion_tokens}, images={image_tokens}, total={total_with_images}")
+            print(f"[TOKENS] Uncategorized: prompt={prompt_tokens}, completion={completion_tokens}, images={image_tokens}, total={total_with_images}")
         return response
 
-    async def _call_llm_async(self, messages, images_base64=None, model="gpt-3.5-turbo", log_token_category=None):
+    async def _call_llm_async(self, messages, model="gpt-3.5-turbo", log_token_category=None):
         # Revert to user's original structure for async Azure/OpenAI calls
         try:
             from openai import AsyncAzureOpenAI
@@ -1808,6 +1941,9 @@ class VideoAnalyzer:
             )
         # ---- END SIZE GUARD ----
 
+        # 1️⃣  Estimate image tokens *before* we send the request
+        est_img_tokens = estimate_image_tokens(messages)
+
         response = await client.chat.completions.create(
             model=self.env.vision.deployment,
             messages=messages,
@@ -1815,17 +1951,42 @@ class VideoAnalyzer:
             **completion_params
             # --- END EDIT ---
         )
+
+        # 2️⃣  Normal token bookkeeping as you already do
         prompt_tokens = response.usage.prompt_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'prompt_tokens') else 0
         completion_tokens = response.usage.completion_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'completion_tokens') else 0
         total_tokens = response.usage.total_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'total_tokens') else prompt_tokens + completion_tokens
-        image_tokens = self._count_image_tokens(images_base64) if images_base64 else 0
-        total_with_images = total_tokens + image_tokens
+
+        # 3️⃣  If Azure did NOT return image_tokens, inject the estimate
+        image_tokens = getattr(response.usage, "image_tokens", None)
+        if image_tokens is None:
+            image_tokens = est_img_tokens          # ← our estimate
+            
+        total_with_images = total_tokens # This is the total from the API response.usage.total_tokens
+
         if log_token_category:
-            self.token_usage[log_token_category] += total_with_images
-            self.token_usage["total"] += total_with_images
-            print(f"[TOKENS] {log_token_category}: prompt={prompt_tokens}, completion={completion_tokens}, images={image_tokens}, total={total_with_images}")
+            # Map generic category → the three detailed counters you already track
+            prompt_key      = f"{log_token_category}_prompt_tokens"
+            completion_key  = f"{log_token_category}_completion_tokens"
+            image_key       = f"{log_token_category}_image_tokens"
+
+            # Ensure the dict has those keys (lets you add new categories without edits elsewhere)
+            for k_init in (prompt_key, completion_key, image_key): # Renamed k to k_init to avoid conflict
+                self.token_usage.setdefault(k_init, 0)
+
+            self.token_usage[prompt_key]     += prompt_tokens
+            self.token_usage[completion_key] += completion_tokens
+            self.token_usage[image_key]      += image_tokens
+
+            # Grand totals used by the final report
+            self.token_usage["report_input_text_tokens"]  += prompt_tokens # prompt_tokens from API includes image tokens
+            self.token_usage["report_output_text_tokens"] += completion_tokens
+            self.token_usage["report_input_image_tokens"] += image_tokens # This is now from API or fallback
+            self.token_usage["report_total_tokens"]       += total_with_images # This is total_tokens from API
+            
+            print(f"[TOKENS] {log_token_category}: prompt={prompt_tokens}, completion={completion_tokens}, images={image_tokens}, total={total_with_images}. Updated detailed and report totals.")
         else:
-            print(f"[TOKENS] prompt={prompt_tokens}, completion={completion_tokens}, images={image_tokens}, total={total_with_images}")
+            print(f"[TOKENS] Uncategorized: prompt={prompt_tokens}, completion={completion_tokens}, images={image_tokens}, total={total_with_images}")
         return response
 
     # --- ADDED: Cleanup Helper ---
@@ -1967,3 +2128,195 @@ class VideoAnalyzer:
              if not seg.transcription:
                  seg.transcription = "No transcription for this segment's time range."
         print("DEBUG: Attached transcription slices to segments.")
+
+
+    # --- ADDED: Method to Calculate Cost ---
+    def _calculate_cost(self) -> Optional[float]:
+        deployment_name = self.env.vision.deployment
+        pricing = self.PRICING_INFO.get(deployment_name)
+
+        if not pricing:
+             # Try common aliases or base model names if specific deployment name not found
+             if "gpt-4o-mini" in deployment_name: pricing = self.PRICING_INFO.get("gpt-4o-mini")
+             elif "gpt-4o" in deployment_name: pricing = self.PRICING_INFO.get("gpt-4o")
+             elif "gpt-4-turbo" in deployment_name: pricing = self.PRICING_INFO.get("gpt-4-turbo")
+             # Add more fallback logic if needed
+
+        if not pricing:
+            print(f"Warning: Pricing information not found for deployment '{deployment_name}'. Cannot calculate cost.")
+            return None
+
+        input_text_price = pricing.get("input_per_million", 0)
+        output_text_price = pricing.get("output_per_million", 0)
+
+        # Azure's report_input_text_tokens already includes the image token equivalent cost
+        api_prompt_tokens = self.token_usage.get("report_input_text_tokens", 0)
+        api_completion_tokens = self.token_usage.get("report_output_text_tokens", 0)
+
+        cost = 0.0
+        cost += (api_prompt_tokens / 1_000_000 * input_text_price)
+        cost += (api_completion_tokens / 1_000_000 * output_text_price)
+        
+        print(f"INFO: Calculated cost based on total Azure input tokens (including image equivalent) and output tokens.")
+        return cost
+
+    # --- ADDED: Method to Upload Action Summary ---
+    def _upload_action_summary(self, local_summary_path: str) -> Optional[str]:
+        """Uploads the ActionSummary.json to blob storage and returns its SAS URL."""
+        if not self.env.blob_storage or not self.env.blob_storage.account_name or \
+           not self.env.blob_storage.container_name or \
+           (not self.env.blob_storage.connection_string and not self.env.blob_storage.sas_token):
+            print("Blob storage not configured for writing outputs. Skipping ActionSummary upload.")
+            return None
+
+        # Check if the local file exists
+        if not os.path.exists(local_summary_path):
+            print(f"Warning: Local summary file not found at {local_summary_path}. Skipping upload.")
+            return None
+
+        # Determine blob name based on input video URL if possible
+        summary_blob_name = f"{os.path.splitext(self.manifest.name)[0]}_ActionSummary.json" # Default name
+        try:
+            if self.video_blob_url:
+                parsed_url = urlparse(self.video_blob_url)
+                # Extract path, remove leading '/' if present
+                input_path = parsed_url.path.lstrip('/')
+                # Remove container name from the start of the path
+                container_name = self.env.blob_storage.container_name
+                if input_path.startswith(container_name + '/'):
+                     input_path = input_path[len(container_name) + 1:]
+
+                # Construct output path
+                input_dir = os.path.dirname(input_path)
+                input_filename = os.path.splitext(os.path.basename(input_path))[0]
+                output_subpath = f"{input_dir}/{input_filename}_analysis" if input_dir else f"{input_filename}_analysis"
+                summary_blob_name = f"{output_subpath}/{os.path.basename(local_summary_path)}"
+                print(f"Derived summary blob name: {summary_blob_name}")
+            else:
+                # Fallback: Place in a general 'analysis_outputs' folder
+                output_subpath = "analysis_outputs"
+                summary_blob_name = f"{output_subpath}/{os.path.basename(local_summary_path)}"
+                print(f"Using default summary blob name: {summary_blob_name}")
+
+            print(f"Attempting to upload {local_summary_path} to blob: {summary_blob_name}")
+            # Use a longer SAS validity for the output file if needed, e.g., 7 days
+            output_sas_url = upload_blob(
+                local_file_path=local_summary_path,
+                blob_name=summary_blob_name,
+                env=self.env,
+                overwrite=True,
+                read_permission_hours=24 * 7 # e.g., 7 days validity
+            )
+
+            if output_sas_url:
+                print(f"ActionSummary uploaded successfully.")
+                return output_sas_url
+            else:
+                print("Warning: Failed to upload ActionSummary.")
+                return None
+        except Exception as e:
+            print(f"Error during ActionSummary upload: {e}")
+            return None
+
+    # --- ADDED: Method to Gather Report Data ---
+    def _gather_report_data(self, final_results: Dict, analysis_config_name: str, elapsed_time: float, local_summary_path: str) -> Dict:
+        """Gathers all data points needed for the summary report."""
+        print("Gathering data for summary report...")
+        report = {}
+
+        # --- Basic Info ---
+        report["Filename"] = self.manifest.name or "N/A"
+        report["Blob URL for file"] = self.video_blob_url or "N/A" # Use stored URL
+        report["Duration"] = f"{self.manifest.source_video.duration:.3f}s" if self.manifest.source_video.duration else "N/A"
+        report["Model used"] = self.env.vision.deployment or "N/A"
+        report["Schema Version"] = "1.0.0" # Placeholder
+
+        # --- Category/Subcategory from ActionSummary ---
+        action_summary = final_results.get("actionSummary", {})
+        report["Category"] = action_summary.get("category", "N/A")
+        report["Subcategory"] = action_summary.get("subCategory", "N/A")
+
+        # --- Scribe Output URL ---
+        report["Scribe Output URL (on blob)"] = self._upload_action_summary(local_summary_path) or "Upload Failed/Skipped"
+
+        # --- Tokens ---
+        report["Input Tokens"] = self.token_usage.get("report_input_text_tokens", 0)
+        report["Output Tokens"] = self.token_usage.get("report_output_text_tokens", 0)
+        report["Image Tokens"] = self.token_usage.get("report_input_image_tokens", 0)
+        report["Total Tokens"] = self.token_usage.get("report_total_tokens", 0)
+
+        # --- Price ---
+        cost = self._calculate_cost()
+        report["Price ($)"] = f"{cost:.6f}" if cost is not None else "Calculation Failed (Check Pricing Info/Model Name)"
+        # --- REMOVE CONFUSING NOTE --- 
+        # The cost calculation already includes image tokens via Azure's total prompt_tokens 
+        # if a specific image_per_million rate isn't provided.
+        # The old note was added if image_per_million was 0 or missing, which was misleading.
+        # if cost is not None and self.token_usage.get("report_input_image_tokens", 0) > 0:
+        #      # Add note if image tokens were used but not priced
+        #      if self.PRICING_INFO.get(self.env.vision.deployment, {}).get("image_per_million", 0) == 0:
+        #           report["Price ($)"] += " (Excludes Image Tokens)"
+        # --- END REMOVAL ---
+
+        # --- Video Resolution ---
+        video_resolution = "N/A"
+        # Prioritize actionSummary's downscaledResolution as it reflects what was likely analyzed
+        downscaled_res_as = action_summary.get("downscaledResolution")
+        if downscaled_res_as and isinstance(downscaled_res_as, list) and len(downscaled_res_as) == 2 and all(isinstance(dim, int) and dim > 0 for dim in downscaled_res_as):
+            video_resolution = f"{downscaled_res_as[0]}x{downscaled_res_as[1]} (analyzed)"
+        elif self.manifest.source_video and self.manifest.source_video.size:
+            size = self.manifest.source_video.size
+            if len(size) == 2 and all(isinstance(s, int) and s > 0 for s in size):
+                video_resolution = f"{size[0]}x{size[1]} (original)"
+        elif self.manifest.processing_params and self.manifest.processing_params.downscaled_resolution:
+            proc_down_res = self.manifest.processing_params.downscaled_resolution
+            if isinstance(proc_down_res, list) and len(proc_down_res) == 2 and all(isinstance(dim, int) and dim > 0 for dim in proc_down_res):
+                 video_resolution = f"{proc_down_res[0]}x{proc_down_res[1]} (downscaled)"
+        report["Video Resolution"] = video_resolution
+
+        print("Report data gathered.")
+        return report
+
+    # --- ADDED: Method to Write Summary Report ---
+    def _write_summary_report(self, report_data: Dict):
+        """Writes the gathered report data to a JSON file."""
+        output_dir = self.manifest.processing_params.output_directory
+        if not output_dir or not os.path.isdir(output_dir):
+            print("Error: Output directory not specified or found. Cannot write report.")
+            return
+
+        report_filename = f"{os.path.splitext(self.manifest.name)[0]}_analysis_report.json"
+        report_filepath = os.path.join(output_dir, report_filename)
+
+        output_json = {
+            "Filename": report_data.get("Filename", "N/A"),
+            "CategoryDetails": {
+                "Category": report_data.get("Category", "N/A"),
+                "Subcategory": report_data.get("Subcategory", "N/A")
+            },
+            "Duration": report_data.get("Duration", "N/A"),
+            "ModelUsed": report_data.get("Model used", "N/A"),
+            "SchemaVersion": report_data.get("Schema Version", "N/A"),
+            "TokenUsage": {
+                "Input": report_data.get("Input Tokens", 0),
+                "Output": report_data.get("Output Tokens", 0),
+                "Image": report_data.get("Image Tokens", 0),
+                "Total": report_data.get("Total Tokens", 0)
+            },
+            "Price": report_data.get("Price ($)", "N/A"),
+            "VideoResolution": report_data.get("Video Resolution", "N/A"),
+            "Links": {
+                "InputVideoBlobURL": report_data.get("Blob URL for file", "N/A"),
+                "ActionSummaryJsonBlobURL": report_data.get("Scribe Output URL (on blob)", "N/A")
+            }
+        }
+
+        try:
+            with open(report_filepath, 'w', encoding='utf-8') as jsonfile:
+                json.dump(output_json, jsonfile, indent=4, ensure_ascii=False)
+            print(f"Analysis summary report saved to: {report_filepath}")
+
+        except Exception as e:
+            print(f"Error writing summary report to {report_filepath}: {e}")
+
+# --- END ADDED METHODS ---
