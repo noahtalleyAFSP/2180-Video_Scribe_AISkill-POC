@@ -44,6 +44,7 @@ def analyze_video(
     use_scene_detection=False,
     scene_detection_threshold=30.0,
     max_concurrent_tasks=8,
+    enable_language_identification: bool = False
 ):
     """Analyze a video using frame descriptions and OpenAI.
     
@@ -200,6 +201,7 @@ def analyze_video(
             overwrite_output=True,
             downscale_to_max_width=downscale_to_max_width,
             downscale_to_max_height=downscale_to_max_height,
+            enable_language_identification=enable_language_identification
         )
         print("Preprocessing completed. Segments generated:", len(manifest.segments))
         
@@ -285,6 +287,7 @@ if __name__ == "__main__":
     parser.add_argument("--copyright-file", help="Path to a JSON file containing copyright information")
     parser.add_argument("--downscale-to-max-width", type=int, help="Maximum width for downscaled frames (maintain aspect ratio)")
     parser.add_argument("--downscale-to-max-height", type=int, help="Maximum height for downscaled frames (maintain aspect ratio)")
+    parser.add_argument("--enable-language-id", action="store_true", help="Enable Azure Batch Transcription Language ID (slower, for unknown languages)")
     args = parser.parse_args()
     
     analyze_video(
@@ -314,4 +317,5 @@ if __name__ == "__main__":
         downscale_to_max_height=args.downscale_to_max_height,
         use_scene_detection=args.use_scene_detection,
         scene_detection_threshold=args.scene_detection_threshold,
+        enable_language_identification=args.enable_language_id
     )
