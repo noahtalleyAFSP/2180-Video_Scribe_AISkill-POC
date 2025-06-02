@@ -1,6 +1,6 @@
-# Cobra Video Analysis Tool
+# Video Scribe Documentation
 
-This tool analyzes videos using Large Language Models (like GPT-4 Vision) to provide structured descriptions of content, including chapters, persons, actions, and objects, with a focus on generating accurate timestamps and leveraging advanced object tracking.
+This tool analyzes videos using Large Language Models (like GPT 4.1) to provide structured descriptions of content, including chapters, persons, actions, and objects, with a focus on generating accurate timestamps and leveraging advanced object tracking.
 
 ## Features
 
