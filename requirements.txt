@@ -1,18 +1,23 @@
-# Core dependencies
-openai>=1.37.0
-python-dotenv>=1.0.1
-pydantic>=2.8.2
-numpy>=2.0.1
-nest-asyncio>=1.6.0
-opencv-python>=4.10.0.84
-pydantic-settings>=2.5.2
-psutil>=5.9.0
+# --- Computer Vision & ML ---
+ultralytics>=8.0.0       # For YOLO object detection and tracking
+torch>=1.9.0             # Required by ultralytics and for general ML
+torchvision>=0.10.0        # For vision-specific PyTorch utilities
+opencv-python>=4.5.0     # For video and image processing (cv2)
+Pillow>=9.0.0            # For image manipulation (PIL)
+numpy>=1.20.0            # For numerical operations
 
-# Azure dependencies
-azure-cognitiveservices-speech>=1.34.0
-azure.ai.vision.imageanalysis>=1.0.0
-azure-storage-blob>=12.19.0
+# --- Azure & OpenAI SDKs ---
+openai>=1.3.0            # For interacting with OpenAI and Azure OpenAI models
+azure-identity>=1.12.0   # For Azure authentication
+azure-storage-blob>=12.9.0 # For Azure Blob Storage interaction
+tiktoken>=0.3.0          # For OpenAI token counting
 
-# Development dependencies
-ipykernel>=6.29.5
-pytest>=8.3.1 
+# --- Video Processing Tools ---
+PySceneDetect[opencv]>=0.6.2 # For scene detection (opencv extra for performance)
+
+# --- Utilities ---
+python-dotenv>=0.19.0    # For loading environment variables from .env files
+pydantic>=1.9.0,<2.0.0   # For data validation and settings management (using v1 features)
+nest-asyncio>=1.5.0      # To allow asyncio event loops to be nested
+
+# Add other specific dependencies or versions as needed below 
