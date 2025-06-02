@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import SecretStr, model_validator
+from pydantic import SecretStr, model_validator, BaseModel, Field, HttpUrl, field_validator
+from typing import Optional, List
 
 
 class GPTVision(BaseSettings):
@@ -73,16 +74,55 @@ class AzureFace(BaseSettings):
         return values
 
 
-class CobraEnvironment(BaseSettings):
-    """
-    A class representing the environment settings for the application.
+class BlobStorageConfig(BaseSettings):
+    """Azure Blob Storage configuration."""
+    model_config = SettingsConfigDict(
+        extra="ignore",
+    )
 
-    Attributes:
-        vision (GPTVision): An instance of GPTVision for handling vision-related tasks.
-        speech (AzureSpeech): An instance of AzureSpeech for handling audio transcription.
-        face (AzureFace): An instance of AzureFace for handling face recognition.
-    """
+    account_name: Optional[str] = Field(
+        default=None, validation_alias="AZURE_STORAGE_ACCOUNT_NAME"
+    )
+    container_name: Optional[str] = Field(
+        default=None, validation_alias="AZURE_STORAGE_CONTAINER_NAME"
+    )
+    # Use one of the following for authentication:
+    connection_string: Optional[SecretStr] = Field(
+        default=None, validation_alias="AZURE_STORAGE_CONNECTION_STRING"
+    )
+    sas_token: Optional[SecretStr] = Field(
+        default=None, validation_alias="AZURE_STORAGE_SAS_TOKEN" # Container or Account SAS
+    )
 
-    vision: GPTVision = GPTVision()
-    speech: AzureSpeech = AzureSpeech()
-    face: AzureFace = AzureFace()
+    @field_validator("account_name", "container_name")
+    def check_required_for_batch(cls, v, info):
+        # These might become mandatory if batch transcription is used
+        # For now, allow None but the transcription function will check
+        return v
+
+    @field_validator("sas_token")
+    def check_auth(cls, v, info):
+        if v is None and info.data.get("connection_string") is None:
+            # We need at least one auth method if account_name/container are provided
+            if info.data.get("account_name") and info.data.get("container_name"):
+                 print("Warning: AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_SAS_TOKEN should be set for Blob Storage access.")
+        return v
+
+
+class CobraEnvironment(BaseModel):
+    """Environment variables for Cobra services."""
+    vision: GPTVision = Field(default_factory=GPTVision)
+    speech: AzureSpeech = Field(default_factory=AzureSpeech)
+    face: AzureFace = Field(default_factory=AzureFace)
+    blob_storage: BlobStorageConfig = Field(default_factory=BlobStorageConfig)
+
+    class Config:
+        # Enable reading from environment variables automatically
+        # Note: Pydantic v2 uses settings_config, v1 used this Config class
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        # Support nested environment variables if needed (adjust based on actual env var names)
+        # env_nested_delimiter = '__' # Example if using VISION__API_KEY etc.
+        extra = "ignore" # Ignore extra fields not defined in the model
+        # Optional: Allow reading directly from environment
+        # Requires Pydantic v2's PydanticSettings, or manual loading in older versions

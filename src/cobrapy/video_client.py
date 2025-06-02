@@ -1,5 +1,5 @@
 import os
-from typing import Union, Type
+from typing import Union, Type, Optional
 from ast import literal_eval
 from dotenv import load_dotenv
 from .cobra_utils import get_file_info
@@ -73,6 +73,11 @@ class VideoClient:
         trim_to_nearest_second=False,
         allow_partial_segments=True,
         overwrite_output=False,
+        use_speech_based_segments=False,
+        use_scene_detection: bool = False,
+        scene_detection_threshold: float = 30.0,
+        downscale_to_max_width: int = None,
+        downscale_to_max_height: int = None,
     ):
         video_manifest_path = self.preprocessor.preprocess_video(
             output_directory=output_directory,
@@ -83,11 +88,16 @@ class VideoClient:
             trim_to_nearest_second=trim_to_nearest_second,
             allow_partial_segments=allow_partial_segments,
             overwrite_output=overwrite_output,
+            use_speech_based_segments=use_speech_based_segments,
+            use_scene_detection=use_scene_detection,
+            scene_detection_threshold=scene_detection_threshold,
+            downscale_to_max_width=downscale_to_max_width,
+            downscale_to_max_height=downscale_to_max_height,
         )
         write_video_manifest(self.manifest)
         return video_manifest_path
 
-    def analyze_video(
+    async def analyze_video(
         self,
         analysis_config: Type[AnalysisConfig],
         run_async=False,
@@ -99,6 +109,7 @@ class VideoClient:
         objects_list_path=None,
         themes_list_path=None,
         actions_list_path=None,
+        copyright_json_str: Optional[str] = None,
     ):
         # If any list paths are provided, need to create a new analyzer instance with them
         if (peoples_list_path or emotions_list_path or objects_list_path or 
@@ -122,12 +133,13 @@ class VideoClient:
             )
 
         # Store the results but keep the manifest reference intact
-        results = self.analyzer.analyze_video(
+        results = await self.analyzer.analyze_video(
             analysis_config,
             run_async=run_async,
             max_concurrent_tasks=max_concurrent_tasks,
             reprocess_segments=reprocess_segments,
             person_group_id=person_group_id,
+            copyright_json_str=copyright_json_str,
         )
         
         # Return the manifest object (not the results list)
