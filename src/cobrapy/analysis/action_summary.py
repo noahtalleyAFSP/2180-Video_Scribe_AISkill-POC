@@ -131,9 +131,9 @@ Output MUST be **only** valid JSON matching this structure:
 ```json
 {{
   "globalTags": {{
-    "persons": [ {{ "name": "Concise label (e.g., 'Man in red shirt', 3-5 words max)", "timecodes": [{{"start": "...", "end": "..."}}] }} ],
-    "objects": [ {{ "name": "Concise label (e.g., 'Red car on street', 3-5 words max)", "timecodes": [{{"start": "...", "end": "..."}}] }} ],
-    "actions": [ {{ "name": "Concise action (e.g., 'Person walking', 'Car driving', 3-5 words max)", "timecodes": [{{"start": "...", "end": "..."}}] }} ]
+    "persons": [ {{ "classDescription": "Concise label (e.g., 'Man in red shirt', 3-5 words max)", "timecodes": [{{"start": "...", "end": "..."}}] }} ],
+    "objects": [ {{ "classDescription": "Concise label (e.g., 'Red car on street', 3-5 words max)", "timecodes": [{{"start": "...", "end": "..."}}] }} ],
+    "actions": [ {{ "classDescription": "Concise action (e.g., 'Person walking', 'Car driving', 3-5 words max)", "timecodes": [{{"start": "...", "end": "..."}}] }} ]
   }}
 }}
 ```
@@ -141,11 +141,11 @@ Output MUST be **only** valid JSON matching this structure:
 **CRITICAL TAGGING INSTRUCTIONS:**
 
 **General Naming Convention:**
-- All 'name' attributes for persons, objects, and actions MUST be very concise (3-5 words maximum), like a short descriptive label.
+- All 'classDescription' attributes for persons, objects, and actions MUST be very concise (3-5 words maximum), like a short descriptive label.
 - For 'persons', focus on key visual characteristics (e.g., 'Woman in blue dress', 'Man with glasses and hat').
 - For 'objects', use a short descriptive name (e.g., 'Red sports car', 'Wooden table with laptop').
 - For 'actions', use a brief verb phrase describing the activity (e.g., 'Person opening door', 'Dog running in park').
-- **Avoid full sentences or paragraphs for the 'name' attribute.**
+- **Avoid full sentences or paragraphs for the 'classDescription' attribute.**
 
 **Persons:**
 {person_instructions}
@@ -335,16 +335,16 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
                 for tag_type in ["persons", "objects", "actions"]:
                     if tag_type in segment_tags and isinstance(segment_tags[tag_type], list):
                         for tag_entry in segment_tags[tag_type]:
-                            if isinstance(tag_entry, dict) and "name" in tag_entry and "timecodes" in tag_entry:
+                            if isinstance(tag_entry, dict) and "classDescription" in tag_entry and "timecodes" in tag_entry:
                                 if tag_type == "persons":
                                     all_persons_intermediate.append(tag_entry)
-                                    current_run_persons.add(tag_entry["name"])
+                                    current_run_persons.add(tag_entry["classDescription"])
                                 elif tag_type == "objects":
                                     all_objects_intermediate.append(tag_entry)
-                                    current_run_objects.add(tag_entry["name"])
+                                    current_run_objects.add(tag_entry["classDescription"])
                                 elif tag_type == "actions": # Actions from main LLM tagging
                                     all_actions_intermediate.append(tag_entry)
-                                    current_run_actions.add(tag_entry["name"])
+                                    current_run_actions.add(tag_entry["classDescription"])
                             else:
                                 logger.warning(f"Malformed tag entry in segment_tags for type {tag_type} in segment {segment_name_for_log}: {tag_entry}")
             
@@ -352,9 +352,9 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
             if segment_obj and hasattr(segment_obj, 'extracted_actions') and segment_obj.extracted_actions: # Check if segment_obj is not None
                 logger.debug(f"Processing {len(segment_obj.extracted_actions)} extracted_actions for segment {segment_obj.segment_name}")
                 for action_entry in segment_obj.extracted_actions:
-                    if isinstance(action_entry, dict) and "name" in action_entry and "timecodes" in action_entry:
+                    if isinstance(action_entry, dict) and "classDescription" in action_entry and "timecodes" in action_entry:
                         all_actions_intermediate.append(action_entry) # Add to the same intermediate list
-                        current_run_actions.add(action_entry["name"])
+                        current_run_actions.add(action_entry["classDescription"])
                     else:
                         logger.warning(f"Malformed extracted_action entry for segment {segment_obj.segment_name}: {action_entry}")
 
@@ -510,7 +510,7 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
         """
         Aggregates and merges timecodes for each tag type.
         For 'persons', groups by 'id', merges timecodes, and uses the first encountered description and metadata.
-        For 'objects' and 'actions', groups by 'name' and merges timecodes.
+        For 'objects' and 'actions', groups by 'classDescription' and merges timecodes.
         """
         aggregated_results: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -526,7 +526,7 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
                     # Ensure 'id' exists, otherwise skip or assign a default
                     person_id = entry.get("id")
                     if person_id is None:
-                        logger.warning(f"Person entry missing 'id', cannot aggregate: {entry.get('name', 'Unknown')}")
+                        logger.warning(f"Person entry missing 'id', cannot aggregate: {entry.get('classDescription', 'Unknown')}")
                         continue
                     persons_by_id[person_id].append(entry)
                 
@@ -551,7 +551,7 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
                     # Construct the final person entry
                     # Preserve relevant fields like yoloClass, thumb, original/refined IDs
                     final_person = {
-                        "name": representative_entry.get("name"),
+                        "classDescription": representative_entry.get("classDescription"),
                         "id": person_id, # This is the grouping key
                         "yoloClass": representative_entry.get("yoloClass", "person"), # Default to person
                         "timecodes": final_timecodes_str_format
@@ -564,27 +564,27 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
                     processed_persons.append(final_person)
                 aggregated_results[tag_type] = processed_persons
             
-            else: # For 'objects' and 'actions', group by 'name'
-                tags_by_name: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            else: # For 'objects' and 'actions', group by 'classDescription'
+                tags_by_description: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
                 for entry in entries:
-                    name = entry.get("name")
-                    if not name:
-                        logger.warning(f"Tag entry of type '{tag_type}' missing 'name': {entry}")
+                    description = entry.get("classDescription")
+                    if not description:
+                        logger.warning(f"Tag entry of type '{tag_type}' missing 'classDescription': {entry}")
                         continue
-                    tags_by_name[name].append(entry)
+                    tags_by_description[description].append(entry)
 
                 processed_tags = []
-                for name, tag_entries_for_name in tags_by_name.items():
-                    if not tag_entries_for_name:
+                for description, tag_entries_for_description in tags_by_description.items():
+                    if not tag_entries_for_description:
                         continue
                     
-                    # Use metadata from the first entry for this name (e.g. yoloClass for objects)
-                    representative_entry = tag_entries_for_name[0]
-                    all_timecodes_for_name = []
-                    for t_entry in tag_entries_for_name:
-                        all_timecodes_for_name.extend(t_entry.get("timecodes", []))
+                    # Use metadata from the first entry for this description (e.g. yoloClass for objects)
+                    representative_entry = tag_entries_for_description[0]
+                    all_timecodes_for_description = []
+                    for t_entry in tag_entries_for_description:
+                        all_timecodes_for_description.extend(t_entry.get("timecodes", []))
                         
-                    numerical_intervals = self._timecodes_to_intervals_action_summary(all_timecodes_for_name)
+                    numerical_intervals = self._timecodes_to_intervals_action_summary(all_timecodes_for_description)
                     merged_intervals_numeric = self._merge_overlapping_intervals_action_summary(numerical_intervals)
                     
                     final_timecodes_str_format = [
@@ -592,7 +592,7 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
                     ]
                     
                     final_tag_entry = {
-                        "name": name, # This is the grouping key
+                        "classDescription": description,
                         "timecodes": final_timecodes_str_format
                     }
                     # For objects, carry over yoloClass, id, thumb, and tracking IDs if present

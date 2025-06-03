@@ -18,8 +18,13 @@ from datetime import datetime, timedelta
 import math # Add math import for duration conversion
 import cv2 # Added import
 import base64 # Added import
+from math import ceil # ADDED For token estimation
 
 logger = logging.getLogger(__name__)
+
+# --- ADDED: Single-tariff constants for GPT-4o/Vision (from video_analyzer.py) ---
+GPT4O_BASE      = 85      # tokens per image – low‑detail     (also the "base" for high‑detail)
+GPT4O_PER_TILE  = 170     # tokens per 512 × 512 tile – high‑detail
 
 
 def encode_image_base64(image_path, quality=None):
@@ -1150,3 +1155,40 @@ def get_frame_crop_base64(video_path: str, frame_number: int, bbox: List[int], c
         logger.error(f"get_frame_crop_base64: Exception during cropping/encoding frame {frame_number}: {e}", exc_info=True)
         return None
 # --- END ADDED UTILITY FUNCTIONS ---
+
+def tiles_needed(w: int, h: int, tile: int = 512) -> int:
+    """Helper for estimate_image_tokens."""
+    return ceil(w / tile) * ceil(h / tile)
+
+def estimate_image_tokens(messages: list[dict]) -> int:
+    """
+    Reproduce Azure's billing formula for GPT‑4o / GPT‑4 Vision.
+
+        • low‑detail  →  85 tokens flat
+        • high‑detail →  85 + 170 × N_tiles   (N_tiles = ceil(w/512)*ceil(h/512))
+
+    width / height are optional extra keys you attach when you build the
+    prompt. If they are missing we assume one 512² tile.
+    """
+    total = 0
+    for m in messages:
+        content = m.get("content") or []
+        # Ensure content is iterable and treat as list if it's a single dict
+        if isinstance(content, dict): 
+            content = [content]
+        if not isinstance(content, list):
+            continue 
+            
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                img_url_data = part.get("image_url") or {}
+                detail = (img_url_data.get("detail") or "low").lower()
+
+                if detail == "high":
+                    # Use provided width/height, fallback to 512 if missing
+                    w = int(img_url_data.get("width",  512))
+                    h = int(img_url_data.get("height", 512))
+                    total += GPT4O_BASE + GPT4O_PER_TILE * tiles_needed(w, h)
+                else:  # "low" or any other unspecified detail
+                    total += GPT4O_BASE
+    return total

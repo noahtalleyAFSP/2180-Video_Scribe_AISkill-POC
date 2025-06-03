@@ -79,15 +79,28 @@ def generate_thumbnail_for_refined_track(
     video_path: str,
     segment_frame_bboxes: List[Dict[str, Any]], # bboxes for this refined segment
     output_dir_refined_thumbs: Path,
-    refined_track_id: str
+    refined_track_id: str,
+    skip_thumbnail_saving: bool = False
 ) -> Optional[str]:
     """
     Generates and saves a thumbnail for a refined track segment.
     Selects a representative frame (e.g., middle one), gets crop, saves it.
     Returns path to saved thumbnail or None.
     """
+    if skip_thumbnail_saving:
+        # print(f"[DEBUG] Skipping thumbnail generation for refined track {refined_track_id} due to flag.")
+        return None
+        
     if not segment_frame_bboxes:
         return None
+
+    # Ensure output directory exists (caller should ideally manage this, but good for robustness)
+    if not output_dir_refined_thumbs.exists():
+        try:
+            output_dir_refined_thumbs.mkdir(parents=True, exist_ok=True)
+        except Exception as e_mkdir_thumb:
+            print(f"[ERROR] generate_thumbnail_for_refined_track: Failed to create thumb dir {output_dir_refined_thumbs}: {e_mkdir_thumb}")
+            return None
 
     # Select middle frame of the segment for the thumbnail
     middle_idx = len(segment_frame_bboxes) // 2
@@ -206,7 +219,8 @@ async def refine_yolo_tracks_across_scenes(
     env: CobraEnvironment,
     video_path: str,
     output_dir: str, 
-    async_llm_client 
+    async_llm_client,
+    skip_thumbnail_saving: bool = False
 ) -> Tuple[List[Dict[str, Any]], int, int, int]:
     """
     Refines raw YOLO tracks, especially for 'person' class, by performing
@@ -221,7 +235,9 @@ async def refine_yolo_tracks_across_scenes(
     next_refined_track_numeric_id = 1
     
     refined_thumbs_dir = Path(output_dir) / DEFAULT_THUMB_DIR_NAME
-    _ensure_dir(refined_thumbs_dir)
+    if not skip_thumbnail_saving:
+        _ensure_dir(refined_thumbs_dir)
+    # else: print(f"[DEBUG] Skipping creation of refined_thumbs_dir due to flag.")
 
     for raw_yolo_track in manifest_raw_yolo_tags:
         track_class = raw_yolo_track["class"]
@@ -243,7 +259,8 @@ async def refine_yolo_tracks_across_scenes(
             thumb_path = raw_yolo_track.get("representative_thumb_path") 
             if all_track_frame_bboxes:
                  new_thumb_path = generate_thumbnail_for_refined_track(
-                    video_path, all_track_frame_bboxes, refined_thumbs_dir, new_id
+                    video_path, all_track_frame_bboxes, refined_thumbs_dir, new_id,
+                    skip_thumbnail_saving=skip_thumbnail_saving
                  )
                  if new_thumb_path: thumb_path = new_thumb_path
             
@@ -280,7 +297,7 @@ async def refine_yolo_tracks_across_scenes(
                 "id": new_id,
                 "class": "person",
                 "original_yolo_id": original_yolo_id,
-                "thumb": generate_thumbnail_for_refined_track(video_path, all_track_frame_bboxes, refined_thumbs_dir, new_id),
+                "thumb": generate_thumbnail_for_refined_track(video_path, all_track_frame_bboxes, refined_thumbs_dir, new_id, skip_thumbnail_saving=skip_thumbnail_saving),
                 "timecodes": [{"start": track_original_start, "end": track_original_end}],
                 "bboxes": all_track_frame_bboxes,
                 "source_scene_ids": scene_ids_for_output
@@ -348,7 +365,7 @@ async def refine_yolo_tracks_across_scenes(
                 "id": new_id,
                 "class": "person",
                 "original_yolo_id": original_yolo_id,
-                "thumb": generate_thumbnail_for_refined_track(video_path, segment_frame_bboxes, refined_thumbs_dir, new_id),
+                "thumb": generate_thumbnail_for_refined_track(video_path, segment_frame_bboxes, refined_thumbs_dir, new_id, skip_thumbnail_saving=skip_thumbnail_saving),
                 "timecodes": [{"start": actual_start_time, "end": actual_end_time}],
                 "bboxes": segment_frame_bboxes,
                 "source_scene_ids": _get_overlapping_scene_ids(actual_start_time, actual_end_time, manifest_segments)

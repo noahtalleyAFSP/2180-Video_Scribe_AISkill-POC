@@ -37,15 +37,26 @@ def tiles_needed(w: int, h: int, tile: int = 512) -> int:
     return ceil(w / tile) * ceil(h / tile)
 
 _TOKEN_USAGE_TEMPLATE = {
-    # generic
-    "prompt_tokens": 0, "completion_tokens": 0,
-    "image_tokens": 0,  "total_tokens": 0,
-    # detailed buckets
-    "chapters_prompt_tokens": 0,  "chapters_completion_tokens": 0,  "chapters_image_tokens": 0,
-    "tags_prompt_tokens": 0,      "tags_completion_tokens": 0,      "tags_image_tokens": 0,
-    "summary_prompt_tokens": 0,   "summary_completion_tokens": 0,
-    "reid_linking_prompt_tokens": 0, "reid_linking_completion_tokens": 0, "reid_linking_image_tokens": 0,
-    # report roll-ups
+    "prompt_tokens": 0, # Will be populated by _finalize_token_usage
+    "completion_tokens": 0, # Will be populated by _finalize_token_usage
+    "image_tokens": 0, # Will be populated by _finalize_token_usage
+    "total_tokens": 0, # Will be populated by _finalize_token_usage
+    # Removed chapter and tag specific token buckets as they are not separately populated
+    "summary_prompt_tokens": 0,
+    "summary_completion_tokens": 0,
+    "summary_image_tokens": 0, # Correctly 0 if summary prompt has no images
+    "reid_linking_prompt_tokens": 0,
+    "reid_linking_completion_tokens": 0,
+    "reid_linking_image_tokens": 0,
+    "segment_generic_analysis_prompt_tokens": 0,
+    "segment_generic_analysis_completion_tokens": 0,
+    "segment_generic_analysis_image_tokens": 0,
+    "yolo_describe_prompt_tokens": 0,
+    "yolo_describe_completion_tokens": 0,
+    "yolo_describe_image_tokens": 0,
+    "action_extraction_prompt_tokens": 0,
+    "action_extraction_completion_tokens": 0,
+    "action_extraction_image_tokens": 0,
     "report_input_text_tokens": 0,
     "report_output_text_tokens": 0,
     "report_input_image_tokens": 0,
@@ -100,6 +111,7 @@ from .cobra_utils import (
     seconds_to_iso8601_duration,
     upload_blob, # Ensure upload_blob is imported
     get_frame_crop_base64, # IMPORTED
+    estimate_image_tokens # ADDED: Import from cobra_utils
 )
 
 logger = logging.getLogger(__name__)
@@ -269,6 +281,41 @@ class VideoAnalyzer:
             self.manifest.yolo_tags = []
         # --- END HYBRID YOLO FALLBACK LOADING ---
 
+        # --- ADDED: Initialize token_usage with Re-ID tokens from manifest ---
+        if hasattr(self.manifest, 'initial_prompt_tokens') and self.manifest.initial_prompt_tokens is not None:
+            self.token_usage["reid_linking_prompt_tokens"] += self.manifest.initial_prompt_tokens
+            self.token_usage["report_input_text_tokens"] += self.manifest.initial_prompt_tokens
+        if hasattr(self.manifest, 'initial_completion_tokens') and self.manifest.initial_completion_tokens is not None:
+            self.token_usage["reid_linking_completion_tokens"] += self.manifest.initial_completion_tokens
+            self.token_usage["report_output_text_tokens"] += self.manifest.initial_completion_tokens
+        if hasattr(self.manifest, 'initial_image_tokens') and self.manifest.initial_image_tokens is not None:
+            # Note: initial_image_tokens from manifest are already *estimated* image tokens.
+            # The reid_linking_image_tokens bucket and report_input_image_tokens should store these.
+            self.token_usage["reid_linking_image_tokens"] += self.manifest.initial_image_tokens
+            self.token_usage["report_input_image_tokens"] += self.manifest.initial_image_tokens
+        
+        # Update total_tokens and report_total_tokens based on these additions
+        self.token_usage["total_tokens"] = (
+            self.token_usage.get("prompt_tokens", 0) +
+            self.token_usage.get("completion_tokens", 0) # Base total is text only for now in this template
+        )
+        # report_total_tokens should reflect everything, including Re-ID.
+        # The _call_llm methods update report_total_tokens with API's total_tokens.
+        # Here, we are adding Re-ID tokens which were not part of an API call made by *this* class.
+        # Let's sum them up into report_total_tokens.
+        self.token_usage["report_total_tokens"] = (
+            self.token_usage.get("report_input_text_tokens", 0) +
+            self.token_usage.get("report_output_text_tokens", 0) +
+            self.token_usage.get("report_input_image_tokens", 0)
+        )
+        if self.manifest.initial_prompt_tokens or self.manifest.initial_completion_tokens or self.manifest.initial_image_tokens:
+            logger.info(f"Initialized VideoAnalyzer.token_usage with Re-ID tokens from manifest: "
+                        f"P={self.manifest.initial_prompt_tokens or 0}, "
+                        f"C={self.manifest.initial_completion_tokens or 0}, "
+                        f"I={self.manifest.initial_image_tokens or 0}.")
+            logger.debug(f"Updated report totals after Re-ID init: InputText={self.token_usage['report_input_text_tokens']}, OutputText={self.token_usage['report_output_text_tokens']}, InputImage={self.token_usage['report_input_image_tokens']}, Total={self.token_usage['report_total_tokens']}")
+        # --- END ADDED ---
+
     def _load_json_list(self, file_path, expected_key):
         """Helper method to load and validate JSON list files."""
         if not file_path or not os.path.exists(file_path):
@@ -303,16 +350,21 @@ class VideoAnalyzer:
         self._current_known_actions = set()
         self._current_known_objects = set()
         # Re-populate from lists if they exist
+        # --- FIX: Use correct key from loaded list data ---
         if self.peoples_list:
-             self._current_known_persons.update(self.peoples_list.get("persons", []))
+             people_items = self.peoples_list.get("persons", []) # Use \'persons\' key
+             if isinstance(people_items, list):
+                 self._current_known_persons.update(item.get("label") or item.get("name") for item in people_items if isinstance(item, dict)) # Use label or name
         if self.actions_list:
-             self._current_known_actions.update(self.actions_list.get("actions", []))
+             action_items = self.actions_list.get("actions", [])
+             if isinstance(action_items, list):
+                 self._current_known_actions.update(item.get("label") or item.get("name") for item in action_items if isinstance(item, dict))
         if self.objects_list:
-             self._current_known_objects.update(self.objects_list.get("objects", []))
+             object_items = self.objects_list.get("objects", [])
+             if isinstance(object_items, list):
+                 self._current_known_objects.update(item.get("label") or item.get("name") for item in object_items if isinstance(item, dict))
+        # --- END FIX ---
 
-        # =====  ADD THIS CALL  =====
-        # self._attach_transcripts_to_segments()  # REMOVED: No such method
-        # ===========================
 
         self.reprocess_segments = reprocess_segments
         self.person_group_id = person_group_id
@@ -338,8 +390,38 @@ class VideoAnalyzer:
             self.active_yolo_tags_source = [] # Ensure it\'s an empty list if no source
         # --- END SET ACTIVE YOLO TAGS SOURCE ---
 
-        # --- MODIFIED: Reset token usage using the complete template ---
-        self.token_usage = _TOKEN_USAGE_TEMPLATE.copy()
+        # --- MODIFIED: Reset token usage and re-apply initial (Re-ID) tokens ---
+        self.token_usage = _TOKEN_USAGE_TEMPLATE.copy() # Reset all to 0 initially for this run
+
+        # Re-apply initial tokens from manifest (e.g., Re-ID tokens loaded in __init__ or passed)
+        # This ensures they are not lost after the reset above.
+        if hasattr(self.manifest, 'initial_prompt_tokens') and self.manifest.initial_prompt_tokens is not None:
+            self.token_usage["reid_linking_prompt_tokens"] += self.manifest.initial_prompt_tokens
+            # Add to report_input_text_tokens as well, assuming initial_prompt_tokens are text-based
+            self.token_usage["report_input_text_tokens"] += self.manifest.initial_prompt_tokens
+        if hasattr(self.manifest, 'initial_completion_tokens') and self.manifest.initial_completion_tokens is not None:
+            self.token_usage["reid_linking_completion_tokens"] += self.manifest.initial_completion_tokens
+            self.token_usage["report_output_text_tokens"] += self.manifest.initial_completion_tokens
+        if hasattr(self.manifest, 'initial_image_tokens') and self.manifest.initial_image_tokens is not None:
+            self.token_usage["reid_linking_image_tokens"] += self.manifest.initial_image_tokens
+            self.token_usage["report_input_image_tokens"] += self.manifest.initial_image_tokens
+        
+        # Recalculate report_total_tokens based on these re-additions if they occurred
+        # Note: _call_llm also adds to report_total_tokens from API responses.
+        if (hasattr(self.manifest, 'initial_prompt_tokens') and self.manifest.initial_prompt_tokens) or \
+           (hasattr(self.manifest, 'initial_completion_tokens') and self.manifest.initial_completion_tokens) or \
+           (hasattr(self.manifest, 'initial_image_tokens') and self.manifest.initial_image_tokens):
+            
+            self.token_usage["report_total_tokens"] = (
+                self.token_usage.get("report_input_text_tokens", 0) +
+                self.token_usage.get("report_output_text_tokens", 0) +
+                self.token_usage.get("report_input_image_tokens", 0)
+            )
+            logger.info(f"Applied initial/Re-ID tokens in analyze_video: "
+                        f"P={self.manifest.initial_prompt_tokens or 0}, "
+                        f"C={self.manifest.initial_completion_tokens or 0}, "
+                        f"I={self.manifest.initial_image_tokens or 0}. "
+                        f"Updated report_total_tokens: {self.token_usage['report_total_tokens']}")
         # --- END MODIFIED ---
 
         stopwatch_start_time = time.time()
@@ -709,33 +791,58 @@ class VideoAnalyzer:
         # and it's the ActionSummary config, just update its runtime fields.
         if (hasattr(analysis_config, "process_segment_results") and
             analysis_config.name == "ActionSummary" and
-            isinstance(final_results, dict) and
-            "actionSummary" in final_results):
+            isinstance(final_results, dict)): # Check if final_results is a dict (it should be if ActionSummary ran)
 
-            logger.info("Injecting final runtime into existing actionSummary.")
-            action_summary_dict = final_results.get("actionSummary", {}) # Get the inner dict
+            logger.info("Injecting final runtime into existing actionSummary output.")
+            
+            # The final_results *is* the action summary dictionary here.
+            # No need for .get("actionSummary") if final_results is already it.
+            target_dict_for_runtime = final_results 
 
-            # Check if action_summary_dict is actually a dictionary before updating
-            if isinstance(action_summary_dict, dict):
-                 # Use seconds_to_iso8601_duration if available, otherwise format manually
+            if isinstance(target_dict_for_runtime, dict):
+                 if "processing_info" not in target_dict_for_runtime:
+                      target_dict_for_runtime["processing_info"] = {}
+                 
+                 # Ensure elapsed_time exists, calculate if not (e.g. if error before its calculation)
+                 if 'elapsed_time' not in locals():
+                     elapsed_time = time.time() - stopwatch_start_time
+
                  try:
                      from .cobra_utils import seconds_to_iso8601_duration
-                     action_summary_dict["runtime"] = seconds_to_iso8601_duration(elapsed_time)
+                     target_dict_for_runtime["processing_info"]["runtime_iso8601"] = seconds_to_iso8601_duration(elapsed_time)
                  except ImportError:
-                     logger.warning("Warning: cobra_utils not found for runtime formatting. Using basic format.")
-                     action_summary_dict["runtime"] = f"PT{elapsed_time:.3f}S"
+                     logger.warning("Warning: cobra_utils not found for runtime formatting. Using basic format for ISO.")
+                     target_dict_for_runtime["processing_info"]["runtime_iso8601"] = f"PT{elapsed_time:.3f}S"
 
-                 action_summary_dict["runtimeSeconds"] = round(elapsed_time, 3)
-                 # No need to reassign final_results['actionSummary'] if it's a mutable dict
+                 target_dict_for_runtime["processing_info"]["runtime_seconds"] = round(elapsed_time, 3)
+                 # Also update the tokens in processing_info if ActionSummary is the direct output
+                 target_dict_for_runtime["processing_info"]["tokens_used"] = self.token_usage
+
             else:
-                 logger.warning(f"Warning: Expected 'actionSummary' to be a dict, but got {type(action_summary_dict)}. Cannot inject runtime.")
+                 logger.warning(f"Warning: Expected 'final_results' to be a dict for ActionSummary, but got {type(target_dict_for_runtime)}. Cannot inject runtime.")
+
 
         # --- END FIX ---
+
+        # --- ADDED: Finalize top-level token counts before returning ---
+        self._finalize_token_usage()
+        # --- END ADDED ---
+
 
         # --- ADDED: Generate Summary Report ---
         try:
             logger.info("Generating Analysis Summary Report...")
-            report_data = self._gather_report_data(final_results, analysis_config.name, elapsed_time, final_results_output_path)
+            # Ensure final_results is defined; it might be set in different branches
+            final_results_for_report = final_results if 'final_results' in locals() else {}
+            elapsed_time_for_report = elapsed_time if 'elapsed_time' in locals() else (time.time() - stopwatch_start_time)
+            output_path_for_report = final_results_output_path if 'final_results_output_path' in locals() else "N/A"
+            
+            report_data = self._gather_report_data(
+                final_results_for_report, 
+                analysis_config.name, 
+                elapsed_time_for_report, 
+                output_path_for_report
+            )
             self._write_summary_report(report_data)
             logger.info("Analysis Summary Report generated.")
         except Exception as report_e:
@@ -974,24 +1081,29 @@ class VideoAnalyzer:
         logger.info(f"Calling LLM for segment {segment.id} ({analysis_config.name}). Image detail: {self.image_detail_level}")
         
         try:
-            llm_response = llm_client.chat.completions.create(
-                model=self.env.vision.deployment or getattr(analysis_config, 'DEFAULT_MODEL', 'gpt-4o'),
+            llm_response = self._call_llm(
                 messages=prompt_messages,
-                max_tokens=getattr(analysis_config, 'MAX_TOKENS_PER_SEGMENT', 2048),
-                temperature=getattr(analysis_config, 'temperature', 0.2),
-                top_p=getattr(analysis_config, 'top_p', 1.0),
+                model=self.env.vision.deployment or getattr(analysis_config, 'DEFAULT_MODEL', 'gpt-4o'), # Pass model from env/config
+                log_token_category="segment_generic_analysis" # Use the new category
             )
+            # Ensure llm_response is not None and has the expected structure
+            if not llm_response or not hasattr(llm_response, 'choices') or not llm_response.choices or not hasattr(llm_response.choices[0], 'message') or not hasattr(llm_response.choices[0].message, 'content'):
+                logger.error(f"LLM call for segment {segment.id} returned an unexpected response structure or was None.")
+                return {"error": "LLM call returned unexpected response structure", "raw_response": str(llm_response)}
+            
             response_content = llm_response.choices[0].message.content
             
-            prompt_tokens = llm_response.usage.prompt_tokens
-            completion_tokens = llm_response.usage.completion_tokens
-            image_tokens = estimate_image_tokens(prompt_messages) 
-            self.token_usage["prompt_tokens"] += prompt_tokens
-            self.token_usage["completion_tokens"] += completion_tokens
-            self.token_usage["image_tokens"] += image_tokens
-            self.token_usage["total_tokens"] += prompt_tokens + completion_tokens 
+            # Token accumulation is now handled by _call_llm, so manual accumulation below is removed.
+            # prompt_tokens = llm_response.usage.prompt_tokens
+            # completion_tokens = llm_response.usage.completion_tokens
+            # image_tokens = estimate_image_tokens(prompt_messages) 
+            # self.token_usage["prompt_tokens"] += prompt_tokens
+            # self.token_usage["completion_tokens"] += completion_tokens
+            # self.token_usage["image_tokens"] += image_tokens
+            # self.token_usage["total_tokens"] += prompt_tokens + completion_tokens 
 
-            logger.debug(f"Segment {segment.id} LLM response received. Tokens: P={prompt_tokens}, C={completion_tokens}, I(est)={image_tokens}")
+            # logger.debug(f"Segment {segment.id} LLM response received. Tokens: P={prompt_tokens}, C={completion_tokens}, I(est)={image_tokens}")
+            # The _call_llm wrapper now handles detailed logging, including the category.
 
         except Exception as e:
             logger.error(f"LLM call failed for segment {segment.id}: {e}", exc_info=True)
@@ -1019,7 +1131,7 @@ class VideoAnalyzer:
             for p_entry in llm_persons: 
                 # p_entry is a dict that should already have name, id, yoloClass, timecodes from _describe_yolo_tags_with_gpt or main LLM
                 new_person_entry = {
-                    "name": p_entry.get("name"),
+                    "classDescription": p_entry.get("classDescription"), # MODIFIED: Use classDescription
                     "id": p_entry.get("id"), # Directly use id from p_entry
                     "yoloClass": p_entry.get("yoloClass", "person"), # Default to person if not present
                     "timecodes": p_entry.get("timecodes", [{"start": segment.start_time, "end": segment.end_time}]),
@@ -1031,7 +1143,7 @@ class VideoAnalyzer:
                         new_person_entry[key] = p_entry[key]
                 
                 if new_person_entry.get("id") is None:
-                     logger.warning(f"Person '{new_person_entry.get('name')}' in segment {segment.id} (sync) still has None ID after processing p_entry: {p_entry}. This should have been resolved earlier.")
+                     logger.warning(f"Person '{new_person_entry.get('classDescription')}' in segment {segment.id} (sync) still has None ID after processing p_entry: {p_entry}. This should have been resolved earlier.") # MODIFIED: Use classDescription
 
                 updated_persons_sync.append(new_person_entry)
             
@@ -1048,7 +1160,7 @@ class VideoAnalyzer:
         if "globalTags" not in final_segment_result: final_segment_result["globalTags"] = {}
         if "objects" not in final_segment_result["globalTags"]: final_segment_result["globalTags"]["objects"] = []
         
-        yolo_object_names_from_llm = {obj.get("name") for obj in final_segment_result["globalTags"].get("objects", [])}
+        yolo_object_names_from_llm = {obj.get("classDescription") for obj in final_segment_result["globalTags"].get("objects", [])} # MODIFIED: Use classDescription
 
         for y_tag in yolo_tags_for_segment:
             if y_tag["class"] != "person": # Persons are handled by the Name-to-TrackID linking or described path
@@ -1069,18 +1181,18 @@ class VideoAnalyzer:
                     tag_numeric_id = y_tag.get("id")
 
                 # Use refined_track_id or original yolo id as name if not described by LLM, else class
-                yolo_tag_name = y_tag.get("gpt_description") # Check if it was described
-                if not yolo_tag_name:
+                yolo_tag_description = y_tag.get("gpt_description") # MODIFIED: Check gpt_description for classDescription
+                if not yolo_tag_description:
                     if self.using_refined_tags and y_tag.get("refined_track_id"):
-                         yolo_tag_name = y_tag.get("refined_track_id") # Fallback to refined_track_id string if not described
+                         yolo_tag_description = y_tag.get("refined_track_id") # Fallback to refined_track_id string if not described
                     elif y_tag.get("id") is not None:
-                         yolo_tag_name = f'{y_tag["class"]}_{y_tag.get("id")}' # Fallback to class_id for raw tags
+                         yolo_tag_description = f'{y_tag["class"]}_{y_tag.get("id")}' # Fallback to class_id for raw tags
                     else:
-                         yolo_tag_name = y_tag["class"] # Ultimate fallback to class
+                         yolo_tag_description = y_tag["class"] # Ultimate fallback to class
 
-                if yolo_tag_name not in yolo_object_names_from_llm: 
+                if yolo_tag_description not in yolo_object_names_from_llm: 
                     object_entry = {
-                        "name": yolo_tag_name, 
+                        "classDescription": yolo_tag_description,  # MODIFIED: Use classDescription
                         "yoloClass": y_tag["class"],  # Corrected to yoloClass
                         "id": tag_numeric_id, # Use the determined numeric ID
                         "timecodes": y_tag["timecodes"],
@@ -1180,29 +1292,30 @@ class VideoAnalyzer:
         llm_response_obj = None
 
         try:
-            llm_response_obj = await self._internal_async_client.chat.completions.create(
-                model=self.env.vision.deployment or getattr(analysis_config, 'DEFAULT_MODEL', 'gpt-4o'),
+            llm_response_obj = await self._call_llm_async(
                 messages=prompt_messages,
-                max_tokens=getattr(analysis_config, 'MAX_TOKENS_PER_SEGMENT', 2048),
-                temperature=getattr(analysis_config, 'temperature', 0.2),
-                top_p=getattr(analysis_config, 'top_p', 1.0),
+                model=self.env.vision.deployment or getattr(analysis_config, 'DEFAULT_MODEL', 'gpt-4o'),
+                log_token_category="segment_generic_analysis" # Use the new category
             )
-            if not llm_response_obj or not hasattr(llm_response_obj, 'choices') or not llm_response_obj.choices:
+
+            if not llm_response_obj or not hasattr(llm_response_obj, 'choices') or not llm_response_obj.choices or not hasattr(llm_response_obj.choices[0], 'message') or not hasattr(llm_response_obj.choices[0].message, 'content'):
                 logger.error(f"LLM async call for segment {segment.segment_name} returned an invalid/empty response object or no choices. Response object: {llm_response_obj}")
                 raw_error_details = str(llm_response_obj) if llm_response_obj else "No response object"
                 return {"error": f"LLM returned invalid/empty response object or no choices. Details: {raw_error_details}", "raw_response": None}
 
             response_content = llm_response_obj.choices[0].message.content
 
-            prompt_tokens = getattr(getattr(llm_response_obj, 'usage', None), 'prompt_tokens', 0)
-            completion_tokens = getattr(getattr(llm_response_obj, 'usage', None), 'completion_tokens', 0)
-            api_total_tokens = getattr(getattr(llm_response_obj, 'usage', None), 'total_tokens', 0)
-            image_tokens = estimate_image_tokens(prompt_messages)
-            self.token_usage["prompt_tokens"] += prompt_tokens
-            self.token_usage["completion_tokens"] += completion_tokens
-            self.token_usage["image_tokens"] += image_tokens
-            self.token_usage["total_tokens"] += api_total_tokens if api_total_tokens > 0 else (prompt_tokens + completion_tokens + image_tokens)
-            logger.debug(f"Segment {segment.segment_name} (async) LLM response. API Tokens: P={prompt_tokens}, C={completion_tokens}, TotalFromAPI={api_total_tokens}. Estimated ImgAdd: {image_tokens}")
+            # Token accumulation is now handled by _call_llm_async, so manual accumulation below is removed.
+            # prompt_tokens = getattr(getattr(llm_response_obj, 'usage', None), 'prompt_tokens', 0)
+            # completion_tokens = getattr(getattr(llm_response_obj, 'usage', None), 'completion_tokens', 0)
+            # api_total_tokens = getattr(getattr(llm_response_obj, 'usage', None), 'total_tokens', 0)
+            # image_tokens = estimate_image_tokens(prompt_messages)
+            # self.token_usage["prompt_tokens"] += prompt_tokens
+            # self.token_usage["completion_tokens"] += completion_tokens
+            # self.token_usage["image_tokens"] += image_tokens
+            # self.token_usage["total_tokens"] += api_total_tokens if api_total_tokens > 0 else (prompt_tokens + completion_tokens + image_tokens)
+            # logger.debug(f"Segment {segment.segment_name} (async) LLM response. API Tokens: P={prompt_tokens}, C={completion_tokens}, TotalFromAPI={api_total_tokens}. Estimated ImgAdd: {image_tokens}")
+            # The _call_llm_async wrapper now handles detailed logging, including the category.
 
         except openai.APIStatusError as e:
             logger.error(f"LLM async call FAILED for segment {segment.segment_name} with APIStatusError: {e.status_code} - {e.response.text if e.response else e.message}", exc_info=True)
@@ -1243,9 +1356,9 @@ class VideoAnalyzer:
                 llm_tags = parsed_llm_output["globalTags"].get(cat, [])
                 yolo_tags = yolo_gpt_tags.get(cat, [])
                 # Add YOLO tags not already present by name
-                llm_names = {t["name"] for t in llm_tags if "name" in t}
+                llm_descriptions = {t["classDescription"] for t in llm_tags if "classDescription" in t} # MODIFIED: Use classDescription
                 for t in yolo_tags:
-                    if t["name"] not in llm_names:
+                    if t["classDescription"] not in llm_descriptions: # MODIFIED: Use classDescription
                         llm_tags.append(t)
                 parsed_llm_output["globalTags"][cat] = llm_tags
         final_segment_result = parsed_llm_output
@@ -1398,7 +1511,7 @@ class VideoAnalyzer:
             thumb_path = tag.get("thumb")
             # Use GPT description if available, fallback to YOLO class
             gpt_desc = tag.get("gpt_description")
-            name = gpt_desc if gpt_desc else tag_class
+            current_class_description = gpt_desc if gpt_desc else tag_class # MODIFIED variable name and assignment
             # If no GPT description, generate one using the crop
             if not gpt_desc and thumb_path and os.path.exists(thumb_path):
                 # Read and encode the crop
@@ -1427,19 +1540,19 @@ class VideoAnalyzer:
                                 extracted_description_content = message_content.strip().replace('"', '')
 
                     if extracted_description_content: # Check if we got a valid, non-empty string
-                        name = extracted_description_content # Update 'name' with the string description
+                        current_class_description = extracted_description_content # MODIFIED: Update current_class_description
                     else:
                         logger.warning(f"LLM did not return a valid string description for YOLO tag class '{tag_class}' (ID info: {final_numeric_id}). Using class name as fallback.")
-                        # 'name' remains tag_class (already set as fallback)
+                        # current_class_description remains tag_class (already set as fallback)
                         pass
 
                 except Exception as e:
                     logger.error(f"Error calling LLM or parsing content for YOLO tag description for '{tag_class}' (ID info: {final_numeric_id}): {e}")
-                    # 'name' remains tag_class (already set as fallback)
+                    # current_class_description remains tag_class (already set as fallback)
                     pass
             
             tag_entry = {
-                "name": name,
+                "classDescription": current_class_description, # MODIFIED: Use classDescription
                 "id": final_numeric_id, # Use the determined numeric ID
                 "yoloClass": tag_class,
                 "timecodes": tag_timecodes
@@ -1997,9 +2110,10 @@ class VideoAnalyzer:
         """Writes the summary report. Placeholder implementation."""
         report_path = os.path.join(
             self.manifest.processing_params.output_directory,
-            f"_AnalysisReport_{report_data.get('analysis_name', 'Generic')}.txt"
+            # Use a consistent naming convention for the report file
+            f"AnalysisReport_{self.manifest.name}_{report_data.get('analysis_name', 'Generic')}.txt"
         )
-        logger.info(f"Placeholder: _write_summary_report called. Report would be written to {report_path}")
+        logger.info(f"Writing analysis summary report to {report_path}")
         try:
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write("--- Analysis Summary Report (Placeholder) ---\n\n")
@@ -2021,7 +2135,7 @@ class VideoAnalyzer:
 Given a sequence of {num_frames} frames from a video segment, referenced as Image #1, Image #2, ..., Image #{num_frames}, along with their precise timestamps relative to the start of the video (e.g., Image #1 at T1.XXXs, Image #2 at T2.XXXs), your task is to identify all distinct actions performed by persons or objects.
 
 Output MUST be ONLY a valid JSON object with a single key "actions", which is a list of action objects.
-Each action object must have "name" (a concise description, 3-7 words max, e.g., "Man opening door", "Car turning left") and "timecodes" (a list of {{ "start": "T_start.XXXs", "end": "T_end.XXXs" }}).
+Each action object must have "classDescription" (a concise description, 3-7 words max, e.g., "Man opening door", "Car turning left") and "timecodes" (a list of {{ "start": "T_start.XXXs", "end": "T_end.XXXs" }}).
 - The "start" time is the timestamp of the first frame in this sequence where the action BEGINS or is clearly visible.
 - The "end" time is the timestamp of the last frame in this sequence where the action ENDS or is still clearly visible.
 - If an action spans multiple provided frames, create a single timecode entry covering its duration within these frames.
@@ -2033,11 +2147,11 @@ Example JSON Output:
 {{
   "actions": [
     {{
-      "name": "Person waving hand",
+      "classDescription": "Person waving hand",
       "timecodes": [{{ "start": "10.123s", "end": "11.456s" }}]
     }},
     {{
-      "name": "Dog barking",
+      "classDescription": "Dog barking",
       "timecodes": [{{ "start": "12.000s", "end": "12.500s" }}]
     }}
   ]
@@ -2133,9 +2247,9 @@ If no actions are detected in the provided frames, return:
                                         if start_time_float <= end_time_float:
                                             valid_timecodes.append({"start": f"{start_time_float:.3f}s", "end": f"{end_time_float:.3f}s"})
                                         else:
-                                            logger.warning(f"Invalid timecode for action '{action.get('name')}': start ({start_time_float}) > end ({end_time_float}). Original: {tc}")
+                                            logger.warning(f"Invalid timecode for action '{action.get('classDescription')}': start ({start_time_float}) > end ({end_time_float}). Original: {tc}") # MODIFIED: Use classDescription for log
                                     except (ValueError, KeyError) as e:
-                                        logger.warning(f"Malformed timecode {tc} for action '{action.get('name')}': {e}")
+                                        logger.warning(f"Malformed timecode {tc} for action '{action.get('classDescription')}': {e}") # MODIFIED: Use classDescription for log
                                 action["timecodes"] = valid_timecodes
                         all_segment_actions.extend(chunk_actions)
                         logger.debug(f"Extracted {len(chunk_actions)} actions from chunk {i // self.ACTION_EXTRACTION_FRAME_CHUNK_SIZE} for segment {segment.segment_name}")
@@ -2220,5 +2334,49 @@ If no actions are detected in the provided frames, return:
             return [] # Return empty list if no relevant tags found
 
     # --- END ADDED ---
+
+    # --- ADDED METHOD: _finalize_token_usage ---
+    def _finalize_token_usage(self):
+        """
+        Sums up token counts from detailed categories into the top-level generic counters.
+        This should be called at the end of the analysis process.
+        """
+        # Define categories that contribute to the top-level sums
+        # Excludes "report_" prefixed keys (as they are already aggregate-like)
+        # and the top-level keys themselves.
+        detailed_categories = [
+            # "chapters", "tags", # Removed as they are no longer in _TOKEN_USAGE_TEMPLATE for separate tracking
+            "summary", "reid_linking",
+            "segment_generic_analysis", "yolo_describe", "action_extraction"
+        ]
+        
+        sum_detailed_prompt_tokens = 0
+        sum_detailed_completion_tokens = 0
+        sum_detailed_image_tokens = 0
+
+        for cat_key_base in detailed_categories:
+            # Prompt tokens from API calls (for vision models, this includes image cost component)
+            sum_detailed_prompt_tokens += self.token_usage.get(f"{cat_key_base}_prompt_tokens", 0)
+            sum_detailed_completion_tokens += self.token_usage.get(f"{cat_key_base}_completion_tokens", 0)
+            # Explicit image tokens (from API `image_tokens` field or our estimation)
+            sum_detailed_image_tokens += self.token_usage.get(f"{cat_key_base}_image_tokens", 0)
+        
+        # Top-level 'prompt_tokens' reflects the total cost attributed to prompts (text + image components of prompt)
+        self.token_usage["prompt_tokens"] = sum_detailed_prompt_tokens
+        self.token_usage["completion_tokens"] = sum_detailed_completion_tokens
+        # Top-level 'image_tokens' is the sum of all explicit image token costs (image part only)
+        self.token_usage["image_tokens"] = sum_detailed_image_tokens
+        
+        # Top-level 'total_tokens' is the sum of all prompt costs and all completion costs.
+        # Since sum_detailed_prompt_tokens already includes the image costs associated with the prompts,
+        # we just add sum_detailed_completion_tokens.
+        self.token_usage["total_tokens"] = sum_detailed_prompt_tokens + sum_detailed_completion_tokens
+        
+        logger.info("Finalized top-level generic token counts by summing detailed buckets.")
+        logger.debug(f"Final top-level: prompt_tokens (incl. prompt image cost)={self.token_usage['prompt_tokens']}, "
+                     f"completion_tokens={self.token_usage['completion_tokens']}, "
+                     f"image_tokens (explicit image part only)={self.token_usage['image_tokens']}, "
+                     f"total_tokens (sum of prompt & completion costs)={self.token_usage['total_tokens']}")
+    # --- END ADDED METHOD ---
 
 

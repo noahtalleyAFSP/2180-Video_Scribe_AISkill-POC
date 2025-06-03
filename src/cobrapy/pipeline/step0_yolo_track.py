@@ -34,7 +34,8 @@ def pad_bbox(bbox, shape, pct=0.10):
 def run_yolo(video_path: Path, out_dir: Path,
              model_path: str = "yolo11x.pt",
              tracker_yaml: str = "bytetrack.yaml",
-             conf: float = 0.20, iou: float = 0.80) -> List[Dict[str, Any]]:
+             conf: float = 0.20, iou: float = 0.80,
+             skip_thumbnail_saving: bool = False) -> List[Dict[str, Any]]:
     """
     Processes a video file, performs object tracking, and returns detailed track information.
 
@@ -89,7 +90,8 @@ def run_yolo(video_path: Path, out_dir: Path,
     
     # --- Prepare output directories ---
     thumbs_dir = out_dir / "yolo_thumbs_raw" # Directory for raw track thumbnails
-    _ensure_dir(thumbs_dir)
+    if not skip_thumbnail_saving:
+        _ensure_dir(thumbs_dir)
 
     # Intermediate structure to store track data:
     # { track_id: {"class": str, "frames": [{"frame_number": int, "timestamp": float, "bbox": list}]} }
@@ -169,29 +171,30 @@ def run_yolo(video_path: Path, out_dir: Path,
 
         # Generate a representative thumbnail for the raw track (e.g., from its first frame)
         thumb_path_str = None
-        try:
-            # Re-open video to extract the specific frame for thumbnail
-            thumb_cap = cv2.VideoCapture(str(video_path))
-            if thumb_cap.isOpened():
-                thumb_cap.set(cv2.CAP_PROP_POS_FRAMES, data["start_frame"])
-                ret_thumb, thumb_frame_img = thumb_cap.read()
-                if ret_thumb:
-                    thumb_bbox = first_frame_data["bbox"] # Use bbox from its first appearance
-                    # Pad the bounding box before cropping
-                    padded_bbox = pad_bbox(thumb_bbox, thumb_frame_img.shape[:2])
-                    x1, y1, x2, y2 = padded_bbox
-                    cropped_thumb = thumb_frame_img[y1:y2, x1:x2]
-                    
-                    if cropped_thumb.size > 0: # Ensure crop is not empty
-                        thumb_filename = f"raw_track_{track_id}.jpg"
-                        thumb_full_path = thumbs_dir / thumb_filename
-                        cv2.imwrite(str(thumb_full_path), cropped_thumb)
-                        thumb_path_str = str(thumb_full_path.resolve())
-                    else:
-                        print(f"[WARNING] Empty crop for thumbnail of track {track_id} at frame {data['start_frame']}")
-                thumb_cap.release()
-        except Exception as e:
-            print(f"[ERROR] Failed to generate thumbnail for raw track {track_id}: {e}")
+        if not skip_thumbnail_saving:
+            try:
+                # Re-open video to extract the specific frame for thumbnail
+                thumb_cap = cv2.VideoCapture(str(video_path))
+                if thumb_cap.isOpened():
+                    thumb_cap.set(cv2.CAP_PROP_POS_FRAMES, data["start_frame"])
+                    ret_thumb, thumb_frame_img = thumb_cap.read()
+                    if ret_thumb:
+                        thumb_bbox = first_frame_data["bbox"] # Use bbox from its first appearance
+                        # Pad the bounding box before cropping
+                        padded_bbox = pad_bbox(thumb_bbox, thumb_frame_img.shape[:2])
+                        x1, y1, x2, y2 = padded_bbox
+                        cropped_thumb = thumb_frame_img[y1:y2, x1:x2]
+                        
+                        if cropped_thumb.size > 0: # Ensure crop is not empty
+                            thumb_filename = f"raw_track_{track_id}.jpg"
+                            thumb_full_path = thumbs_dir / thumb_filename
+                            cv2.imwrite(str(thumb_full_path), cropped_thumb)
+                            thumb_path_str = str(thumb_full_path.resolve())
+                        else:
+                            print(f"[WARNING] Empty crop for thumbnail of track {track_id} at frame {data['start_frame']}")
+                    thumb_cap.release()
+            except Exception as e:
+                print(f"[ERROR] Failed to generate thumbnail for raw track {track_id}: {e}")
 
 
         raw_yolo_output_list.append({
