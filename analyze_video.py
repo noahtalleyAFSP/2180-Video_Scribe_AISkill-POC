@@ -15,7 +15,8 @@ from cobrapy.cobra_utils import get_file_info
 from pydantic import SecretStr
 from pathlib import Path
 from cobrapy.pipeline.step0_yolo_track import run_yolo
-from cobrapy.track_refiner import refine_yolo_tracks_across_scenes # ADDED IMPORT
+from cobrapy.pipeline.step0b_reid_split_tracks import refine_tracks_over_cuts # ADDED: New import
+from cobrapy.track_refiner import refine_yolo_tracks_across_scenes # Existing import
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider # For Async Client
 from openai import AsyncAzureOpenAI, AsyncOpenAI # MODIFIED: Added AsyncOpenAI
 
@@ -61,7 +62,8 @@ async def analyze_video_async_wrapper(
     scene_detection_threshold=30.0,
     max_concurrent_tasks=8,
     enable_language_identification: bool = False,
-    skip_refinement: bool = False # ADDED: Flag to skip refinement for debugging
+    skip_refinement: bool = False, # ADDED: Flag to skip refinement for debugging
+    skip_thumbnail_saving: bool = False # ADDED: Flag to skip saving of YOLO and Re-ID thumbnails
 ):
     """Analyze a video using frame descriptions and OpenAI.
     This is an async wrapper to handle async client setup for track refinement.
@@ -212,47 +214,129 @@ async def analyze_video_async_wrapper(
 
         # --- Step 2: Raw YOLO Object Tracking --- 
         print(f"Running raw YOLO object tracking for {video_path_abs}...")
-        # run_yolo expects output_dir as Path object
-        raw_yolo_tags = run_yolo(video_path=video_path_obj, out_dir=output_dir_path)
-        manifest.raw_yolo_tags = raw_yolo_tags # Store raw tags
-        print(f"Raw YOLO tracking completed. Found {len(raw_yolo_tags)} raw tracks.")
-        # Save raw_yolo_tags to a file in output_dir for inspection
-        raw_tags_file = output_dir_path / f"{video_path_obj.stem}_manifest_raw_yolo_tags.json"
-        with open(raw_tags_file, "w") as f:
+        raw_yolo_tags = run_yolo(
+            video_path=video_path_obj, 
+            out_dir=output_dir_path,
+            skip_thumbnail_saving=skip_thumbnail_saving
+            )
+        # Save raw_yolo_tags to a file in output_dir for inspection and as input for step0b
+        raw_tags_file_path = output_dir_path / f"{video_path_obj.stem}_manifest_raw_yolo_tags.json"
+        with open(raw_tags_file_path, "w") as f:
             json.dump(raw_yolo_tags, f, indent=2)
-        print(f"Saved raw YOLO tags to {raw_tags_file}")
+        print(f"Saved raw YOLO tags to {raw_tags_file_path}")
+        manifest.raw_yolo_tags = raw_yolo_tags # Store raw tags in manifest as well
 
-        # --- Step 3: Refine YOLO Tracks Across Scenes (New) ---
+        # --- Step 3a: Refine YOLO Tracks by Splitting at Scene Cuts (New: step0b) ---
+        tracks_for_next_refinement_step = raw_yolo_tags # Default to raw if step0b is skipped or fails
+        reid_split_refined_tags_path = None # Path to the output of step0b
+
         if not skip_refinement:
-            if manifest.segments and manifest.raw_yolo_tags and async_llm_client_main_script: # MODIFIED: Use new variable name
-                print("Starting YOLO track refinement across scenes...")
+            if manifest.segments and raw_yolo_tags and async_llm_client_main_script:
+                print("Starting Step 3a: YOLO track splitting at scene cuts (step0b_reid_split_tracks)...")
+                # Create _cuts.json file from manifest segments
+                cut_times = []
+                if len(manifest.segments) > 1: # Only makes sense if there are multiple segments (i.e., cuts)
+                    # A cut occurs at the end of each segment, except for the last one if it covers the video end.
+                    # More precisely, a cut is the start_time of segment N if N > 0.
+                    # Or, end_time of segment N if it's not the video duration.
+                    for i, seg in enumerate(manifest.segments):
+                        if i > 0: # The start of any segment after the first is a cut relative to the previous.
+                            cut_times.append(seg.start_time)
+                        # If a segment doesn't run to the end of the video, its end is also a cut.
+                        # However, PysceneDetect usually gives segments that meet at cuts.
+                        # Using segment start times (for seg_index > 0) is generally safer for representing cuts.
+                
+                # A simpler way to get cuts: end time of each segment, except the very last one if it reaches video end.
+                # For PySceneDetect, segment boundaries are the cuts.
+                cut_times = sorted(list(set([seg.end_time for seg in manifest.segments[:-1]]))) # end_time of all but last segment
+                # Also consider start_time of segments > 0 as cuts if not already captured
+                # cut_times.update([seg.start_time for i, seg in enumerate(manifest.segments) if i > 0])
+                # cut_times = sorted(list(cut_times))
+
+                cuts_json_path = output_dir_path / f"{video_path_obj.stem}_cuts.json"
+                with open(cuts_json_path, "w") as f:
+                    json.dump(cut_times, f, indent=2)
+                print(f"Saved scene cut times to {cuts_json_path} ({len(cut_times)} cuts identified from segments).")
+
+                if not cut_times:
+                    print("No scene cuts identified from segments. Skipping track splitting (step0b).")
+                    tracks_for_next_refinement_step = raw_yolo_tags
+                else:
+                    try:
+                        # MODIFIED: Expect 4 return values (tracks, p_tokens, c_tokens, i_tokens)
+                        split_refined_tags_list, step0b_p_tokens, step0b_c_tokens, step0b_i_tokens = await refine_tracks_over_cuts(
+                            raw_yolo_tracks_path=str(raw_tags_file_path.resolve()),
+                            scene_cuts_path=str(cuts_json_path.resolve()),
+                            video_path_str=video_path_abs,
+                            output_dir_str=str(output_dir_path.resolve()),
+                            llm_client=async_llm_client_main_script, # Pass the LLM client
+                            llm_deployment=env.vision.deployment, # Pass deployment/model name
+                            skip_thumbnail_saving=skip_thumbnail_saving
+                        )
+                        if split_refined_tags_list:
+                            print(f"Step 0b (reid_split_tracks) completed. Produced {len(split_refined_tags_list)} tracks after cut-splitting.")
+                            print(f"Step 0b LLM Tokens: P={step0b_p_tokens}, C={step0b_c_tokens}, Img={step0b_i_tokens}")
+                            tracks_for_next_refinement_step = split_refined_tags_list
+                            # --- ADDED: Accumulate tokens into manifest --- 
+                            manifest.initial_prompt_tokens = (manifest.initial_prompt_tokens or 0) + step0b_p_tokens
+                            manifest.initial_completion_tokens = (manifest.initial_completion_tokens or 0) + step0b_c_tokens
+                            manifest.initial_image_tokens = (manifest.initial_image_tokens or 0) + step0b_i_tokens
+                            # --- END ADDED ---
+                            # Save the output of this step for inspection
+                            reid_split_refined_tags_path = output_dir_path / f"{video_path_obj.stem}_reid_split_refined_yolo_tags.json"
+                            # The refine_tracks_over_cuts function already saves this file, so this is just for the path variable.
+                        else:
+                            print("Step 0b (reid_split_tracks) did not return any tracks. Using raw YOLO tags for next step.")
+                            tracks_for_next_refinement_step = raw_yolo_tags
+                    except Exception as e_step0b:
+                        print(f"[ERROR] During Step 0b (reid_split_tracks): {e_step0b}. Proceeding with raw YOLO tags.")
+                        import traceback
+                        traceback.print_exc()
+                        tracks_for_next_refinement_step = raw_yolo_tags
+            elif not async_llm_client_main_script:
+                print("[WARNING] Skipping Step 3a (track splitting) as async LLM client (main script) failed to initialize.")
+            else:
+                print("[INFO] Skipping Step 3a (track splitting): no scenes/segments, or no raw tags.")
+        else:
+            print("[INFO] Skipping all refinement steps (including track splitting at cuts) as per --skip-refinement flag.")
+
+        # --- Step 3b: Refine YOLO Tracks Across Scenes (Existing track_refiner.py) ---
+        # This step now takes the output of step0b (tracks_for_next_refinement_step)
+        if not skip_refinement:
+            if manifest.segments and tracks_for_next_refinement_step and async_llm_client_main_script:
+                print("Starting Step 3b: YOLO track refinement across scenes (track_refiner.py)...")
                 # refine_yolo_tracks_across_scenes now returns a tuple
-                refined_tags_list, reid_prompt_tokens, reid_completion_tokens, reid_image_tokens = await refine_yolo_tracks_across_scenes(
+                # It should now use tracks_for_next_refinement_step as its input tracks
+                refined_tags_list_final, reid_prompt_tokens, reid_completion_tokens, reid_image_tokens = await refine_yolo_tracks_across_scenes(
                     manifest_segments=manifest.segments, 
-                    manifest_raw_yolo_tags=manifest.raw_yolo_tags,
+                    manifest_raw_yolo_tags=tracks_for_next_refinement_step, # <--- NEW: use output from step0b
                     env=env,
                     video_path=video_path_abs,
                     output_dir=output_dir_abs, 
-                    async_llm_client=async_llm_client_main_script # MODIFIED: Pass the correctly named client
+                    async_llm_client=async_llm_client_main_script,
+                    skip_thumbnail_saving=skip_thumbnail_saving # ADDED
                 )
-                manifest.refined_yolo_tags = refined_tags_list
+                manifest.refined_yolo_tags = refined_tags_list_final # This is the final refined list for VideoAnalyzer
                 manifest.initial_prompt_tokens = (manifest.initial_prompt_tokens or 0) + reid_prompt_tokens
                 manifest.initial_completion_tokens = (manifest.initial_completion_tokens or 0) + reid_completion_tokens
                 manifest.initial_image_tokens = (manifest.initial_image_tokens or 0) + reid_image_tokens
                 
-                print(f"YOLO track refinement completed. Produced {len(manifest.refined_yolo_tags)} refined tracks.")
-                print(f"Re-ID LLM Tokens: P={reid_prompt_tokens}, C={reid_completion_tokens}, Img={reid_image_tokens} (added to manifest initial tokens)")
-                # Save refined_yolo_tags to a file
-                refined_tags_file = output_dir_path / f"{video_path_obj.stem}_manifest_refined_yolo_tags.json"
-                with open(refined_tags_file, "w") as f:
+                print(f"Step 3b (track_refiner) completed. Produced {len(manifest.refined_yolo_tags)} final refined tracks.")
+                print(f"Re-ID LLM Tokens (Step 3b): P={reid_prompt_tokens}, C={reid_completion_tokens}, Img={reid_image_tokens} (added to manifest initial tokens)")
+                # Save final refined_yolo_tags to a file
+                final_refined_tags_file = output_dir_path / f"{video_path_obj.stem}_manifest_final_refined_yolo_tags.json"
+                with open(final_refined_tags_file, "w") as f:
                     json.dump(manifest.refined_yolo_tags, f, indent=2)
-                print(f"Saved refined YOLO tags to {refined_tags_file}")
-            elif not async_llm_client_main_script: # MODIFIED: Use new variable name
-                 print("[WARNING] Skipping track refinement as async LLM client (main script) failed to initialize.")
+                print(f"Saved final refined YOLO tags to {final_refined_tags_file}")
+            elif not async_llm_client_main_script:
+                 print("[WARNING] Skipping Step 3b (track_refiner) as async LLM client (main script) failed to initialize.")
             else:
-                print("[INFO] Skipping track refinement: no scenes, no raw tags, or client issue.")
+                print("[INFO] Skipping Step 3b (track_refiner): no scenes, no input tags from previous step, or client issue.")
         else:
-            print("[INFO] Skipping track refinement as per --skip-refinement flag.")
+            # If refinement is skipped, VideoAnalyzer will use raw_yolo_tags if refined_yolo_tags is empty/None.
+            # Ensure manifest.refined_yolo_tags is None or empty if skipping.
+            manifest.refined_yolo_tags = []
+            print("[INFO] --skip-refinement: Final refined_yolo_tags set to empty. VideoAnalyzer will use raw tags.")
 
         # --- Step 4: Main Video Analysis (using VideoAnalyzer) --- 
         analyzer_instance = VideoAnalyzer( # MODIFIED: Store instance
@@ -355,6 +439,7 @@ if __name__ == "__main__":
     parser.add_argument("--downscale-to-max-height", type=int, help="Max height for frame downscaling")
     parser.add_argument("--enable-language-id", action="store_true", help="Enable Azure Batch Transcription Language ID")
     parser.add_argument("--skip-refinement", action="store_true", help="Skip the new track refinement step")
+    parser.add_argument("--skip-thumbnail-saving", action="store_true", help="If set, skips saving of YOLO and Re-ID thumbnails")
 
     args = parser.parse_args()
     
@@ -387,5 +472,6 @@ if __name__ == "__main__":
         use_scene_detection=args.use_scene_detection,
         scene_detection_threshold=args.scene_detection_threshold,
         enable_language_identification=args.enable_language_id,
-        skip_refinement=args.skip_refinement
+        skip_refinement=args.skip_refinement,
+        skip_thumbnail_saving=args.skip_thumbnail_saving
     ))

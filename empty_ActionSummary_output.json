@@ -1,0 +1,74 @@
+{
+  "chapters": [
+    {
+      "start": "0.000s",
+      "end": "0.000s",
+      "shotType": [],
+      "shotDescription": "",
+      "sentiment": "neutral",
+      "emotions": [],
+      "theme": "",
+      "summary": "",
+      "dominantColorsHex": []
+    }
+  ],
+  "globalTags": {
+    "persons": [
+      {
+        "classDescription": "",
+        "id": null,
+        "yoloClass": "person",
+        "timecodes": []
+      }
+    ],
+    "actions": [
+      {
+        "classDescription": "",
+        "timecodes": []
+      }
+    ],
+    "objects": [
+      {
+        "classDescription": "",
+        "id": null,
+        "yoloClass": "",
+        "timecodes": []
+      }
+    ]
+  },
+  "processing_info": {
+    "processed_segments": 0,
+    "runtime_iso8601": "PT0S",
+    "runtime_seconds": 0.0,
+    "tokens_used": {
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "image_tokens": 0,
+      "total_tokens": 0,
+      "summary_prompt_tokens": 0,
+      "summary_completion_tokens": 0,
+      "summary_image_tokens": 0,
+      "reid_linking_prompt_tokens": 0,
+      "reid_linking_completion_tokens": 0,
+      "reid_linking_image_tokens": 0,
+      "segment_generic_analysis_prompt_tokens": 0,
+      "segment_generic_analysis_completion_tokens": 0,
+      "segment_generic_analysis_image_tokens": 0,
+      "yolo_describe_prompt_tokens": 0,
+      "yolo_describe_completion_tokens": 0,
+      "yolo_describe_image_tokens": 0,
+      "action_extraction_prompt_tokens": 0,
+      "action_extraction_completion_tokens": 0,
+      "action_extraction_image_tokens": 0,
+      "report_input_text_tokens": 0,
+      "report_output_text_tokens": 0,
+      "report_input_image_tokens": 0,
+      "report_total_tokens": 0
+    },
+    "copyright_info_applied": false
+  },
+  "category": "",
+  "subCategory": null,
+  "description": "",
+  "summary": ""
+} 
