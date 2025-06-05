@@ -5,6 +5,7 @@ import numpy as np
 import psutil
 from typing import Union, Type, Optional, List, Tuple
 
+import logging
 import concurrent.futures
 import requests
 from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
@@ -37,6 +38,8 @@ from .cobra_utils import (
     upload_blob,
     generate_batch_transcript,
 )
+
+logger = logging.getLogger(__name__)
 
 # --- ADDED: Helper function for dominant color extraction ---
 def _get_dominant_colors(image_path: str, num_colors: int = 5, resize_width: int = 100) -> List[str]:
@@ -149,12 +152,35 @@ class VideoPreProcessor:
         scene_detection_threshold: float = 30.0,
         downscale_to_max_width: int = None,
         downscale_to_max_height: int = None,
-        enable_language_identification: bool = False
+        enable_language_identification: bool = False,
+        run_timestamp: Optional[str] = None
     ) -> str:
-        start_time = time.time()
-        print(
-            f"({get_elapsed_time(start_time)}s) Preprocessing video {self.manifest.name}"
+        start_time_total = time.time()
+
+        # --- Setup Output Directory & Manifest Params ---
+        asset_dir_path = prepare_outputs_directory(
+            file_name=self.manifest.name,
+            segment_length=segment_length,
+            frames_per_second=fps,
+            output_directory=output_directory, # This will be the already timestamped dir
+            overwrite_output=False # Always False unless user explicitly requests
         )
+        self.manifest.processing_params.output_directory = asset_dir_path
+        self.manifest.processing_params.segment_length = segment_length
+        self.manifest.processing_params.fps = fps
+        self.manifest.processing_params.generate_transcript_flag = generate_transcripts_flag
+        self.manifest.processing_params.trim_to_nearest_second = trim_to_nearest_second
+        self.manifest.processing_params.allow_partial_segments = allow_partial_segments
+        self.manifest.processing_params.use_speech_based_segments = use_speech_based_segments
+        self.manifest.processing_params.downscaled_resolution = (
+            [downscale_to_max_width, downscale_to_max_height]
+            if downscale_to_max_width and downscale_to_max_height
+            else None
+        )
+        self.manifest.processing_params.run_timestamp = run_timestamp # STORE run_timestamp
+
+        logger.info(f"Output directory set to: {asset_dir_path}")
+        logger.info(f"Run timestamp: {run_timestamp}")
 
         if not isinstance(self.manifest, VideoManifest):
             raise ValueError("Video manifest is not defined.")
@@ -171,7 +197,7 @@ class VideoPreProcessor:
                 segment_length = self.manifest.source_video.duration
 
         # Set processing parameters
-        print(f"({get_elapsed_time(start_time)}) Setting processing parameters...")
+        print(f"({get_elapsed_time(start_time_total)}) Setting processing parameters...")
         self.manifest.processing_params.fps = fps
         # Store both, but prioritize scene detection if used
         self.manifest.processing_params.segment_length = segment_length
@@ -182,16 +208,16 @@ class VideoPreProcessor:
         if use_scene_detection:
             if SCENEDETECT_AVAILABLE:
                 segmentation_method = "scene"
-                print(f"({get_elapsed_time(start_time)}s) Using Scene Detection (threshold={scene_detection_threshold}).")
+                print(f"({get_elapsed_time(start_time_total)}s) Using Scene Detection (threshold={scene_detection_threshold}).")
             else:
-                print(f"({get_elapsed_time(start_time)}s) Warning: use_scene_detection=True but scenedetect library not found. Falling back to time-based segmentation.")
+                print(f"({get_elapsed_time(start_time_total)}s) Warning: use_scene_detection=True but scenedetect library not found. Falling back to time-based segmentation.")
         elif use_speech_based_segments:
              # Existing speech-based logic (if implemented) could go here or stay as is
              # For now, assume time-based is the primary fallback
-             print(f"({get_elapsed_time(start_time)}s) Using Speech-Based Segmentation (if audio and transcription available).")
+             print(f"({get_elapsed_time(start_time_total)}s) Using Speech-Based Segmentation (if audio and transcription available).")
              segmentation_method = "speech" # Or keep your existing logic flow
         else:
-             print(f"({get_elapsed_time(start_time)}s) Using Time-Based Segmentation (interval={segment_length}s).")
+             print(f"({get_elapsed_time(start_time_total)}s) Using Time-Based Segmentation (interval={segment_length}s).")
         # --- End Determination ---
 
         # Set other params
@@ -209,38 +235,12 @@ class VideoPreProcessor:
         self.manifest.processing_params.allow_partial_segments = allow_partial_segments
         self.manifest.processing_params.downscaled_resolution = None
 
-        # Prepare the output directory
-        print(f"({get_elapsed_time(start_time)}s) Preparing output directory")
-        output_dir_prefix = "sceneDetect_" if segmentation_method == "scene" else "" # Add prefix if using scenes
-        if output_directory is not None:
-            self.manifest.processing_params.output_directory = (
-                prepare_outputs_directory(
-                    file_name=self.manifest.name,
-                    output_directory=output_directory,
-                    # Include prefix in default name generation logic if output_directory is None
-                    output_directory_prefix=output_dir_prefix,
-                    frames_per_second=fps,
-                    segment_length=segment_length if segmentation_method != "scene" else scene_detection_threshold, # Use threshold in name for scenes
-                    overwrite_output=overwrite_output,
-                )
-            )
-        else:
-             self.manifest.processing_params.output_directory = (
-                 prepare_outputs_directory(
-                    file_name=self.manifest.name,
-                    output_directory_prefix=output_dir_prefix,
-                    segment_length=segment_length if segmentation_method != "scene" else scene_detection_threshold,
-                    frames_per_second=fps,
-                    overwrite_output=overwrite_output,
-                 )
-             )
-
         # Extract audio and transcribe (remains the same logic)
         if (
             self.manifest.source_video.audio_found
             and self.manifest.processing_params.generate_transcript_flag
         ):
-            print(f"({get_elapsed_time(start_time)}s) Extracting audio and initiating Batch Transcription...")
+            print(f"({get_elapsed_time(start_time_total)}s) Extracting audio and initiating Batch Transcription...")
             # Ensure max_workers is defined or defaulted before passing
             if max_workers is None:
                 cpu_count = psutil.cpu_count(logical=False) or 1
@@ -253,19 +253,19 @@ class VideoPreProcessor:
                     enable_language_identification=enable_language_identification
                 )
                 if not self.manifest.audio_transcription:
-                     print(f"({get_elapsed_time(start_time)}s) Warning: Batch transcription did not produce results.")
+                     print(f"({get_elapsed_time(start_time_total)}s) Warning: Batch transcription did not produce results.")
                 else:
-                     print(f"({get_elapsed_time(start_time)}s) Batch transcription completed.")
+                     print(f"({get_elapsed_time(start_time_total)}s) Batch transcription completed.")
             except Exception as e:
-                print(f"({get_elapsed_time(start_time)}s) ERROR during audio extraction or transcription: {e}")
-                print(f"({get_elapsed_time(start_time)}s) Warning: Continuing preprocessing without transcription.")
+                print(f"({get_elapsed_time(start_time_total)}s) ERROR during audio extraction or transcription: {e}")
+                print(f"({get_elapsed_time(start_time_total)}s) Warning: Continuing preprocessing without transcription.")
                 self.manifest.processing_params.generate_transcript_flag = False
 
         # --- Run Scene Detection if requested ---
         scene_list_seconds: Optional[List[Tuple[float, float]]] = None
         if segmentation_method == "scene":
             try:
-                print(f"({get_elapsed_time(start_time)}s) Running PySceneDetect...")
+                print(f"({get_elapsed_time(start_time_total)}s) Running PySceneDetect...")
                 # Ensure video path exists before opening
                 if not self.manifest.source_video.path or not os.path.exists(self.manifest.source_video.path):
                     raise FileNotFoundError(f"Source video path not found: {self.manifest.source_video.path}")
@@ -279,19 +279,19 @@ class VideoPreProcessor:
                     (start.get_seconds(), end.get_seconds())
                     for start, end in scene_list_timecodes
                 ]
-                print(f"({get_elapsed_time(start_time)}s) Detected {len(scene_list_seconds)} scenes.")
+                print(f"({get_elapsed_time(start_time_total)}s) Detected {len(scene_list_seconds)} scenes.")
                 if not scene_list_seconds:
-                     print(f"({get_elapsed_time(start_time)}s) Warning: No scenes detected. Falling back to time-based segmentation.")
+                     print(f"({get_elapsed_time(start_time_total)}s) Warning: No scenes detected. Falling back to time-based segmentation.")
                      segmentation_method = "time" # Fallback if no scenes found
                      scene_list_seconds = None
             except Exception as e:
-                 print(f"({get_elapsed_time(start_time)}s) ERROR during scene detection: {e}. Falling back to time-based segmentation.")
+                 print(f"({get_elapsed_time(start_time_total)}s) ERROR during scene detection: {e}. Falling back to time-based segmentation.")
                  segmentation_method = "time" # Fallback on error
                  scene_list_seconds = None
         # --- End Scene Detection ---
 
         # Generate the segments (now accepts scene_list)
-        print(f"({get_elapsed_time(start_time)}s) Generating segments using {segmentation_method} method...")
+        print(f"({get_elapsed_time(start_time_total)}s) Generating segments using {segmentation_method} method...")
         self._generate_segments(scene_list=scene_list_seconds) # Pass the detected scenes
 
         # Configure thread pool
@@ -301,7 +301,7 @@ class VideoPreProcessor:
             max_workers = min(cpu_count, int(memory // 2))
 
         # Process the segments (remains mostly the same)
-        print(f"({get_elapsed_time(start_time)}s) Processing segments (extracting frames)...")
+        print(f"({get_elapsed_time(start_time_total)}s) Processing segments (extracting frames)...")
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             for i, segment in enumerate(self.manifest.segments):
@@ -335,7 +335,7 @@ class VideoPreProcessor:
                     print(f'Segment processing generated an exception: {exc}')
 
 
-        print(f"({get_elapsed_time(start_time)}s) All segments pre-processed")
+        print(f"({get_elapsed_time(start_time_total)}s) All segments pre-processed")
 
         # Validation check
         for segment in self.manifest.segments:
@@ -353,7 +353,12 @@ class VideoPreProcessor:
 
 
         write_video_manifest(self.manifest)
-        return self.manifest.video_manifest_path
+        logger.info(f"Video manifest saved to {self.manifest.video_manifest_path} (inside preprocess_video)")
+        
+        # Ensure asset_dir_path is what we return, as it's the directory.
+        # self.manifest.processing_params.output_directory should be identical to asset_dir_path here.
+        logger.info(f"PreProcessor is returning asset_dir_path: {asset_dir_path}")
+        return asset_dir_path
 
     def _generate_segments(self, scene_list: Optional[List[Tuple[float, float]]] = None):
         # Ensure source video duration is available

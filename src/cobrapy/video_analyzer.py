@@ -316,6 +316,8 @@ class VideoAnalyzer:
             logger.debug(f"Updated report totals after Re-ID init: InputText={self.token_usage['report_input_text_tokens']}, OutputText={self.token_usage['report_output_text_tokens']}, InputImage={self.token_usage['report_input_image_tokens']}, Total={self.token_usage['report_total_tokens']}")
         # --- END ADDED ---
 
+        self.prompt_log = []  # List of dicts, each with keys: type, context, messages
+
     def _load_json_list(self, file_path, expected_key):
         """Helper method to load and validate JSON list files."""
         if not file_path or not os.path.exists(file_path):
@@ -506,21 +508,17 @@ class VideoAnalyzer:
                 # Assign the potentially processed results to final_results
                 final_results = processed_results # 'processed_results' IS the action summary dict
 
-                # --- Update manifest.global_tags from the 'globalTags' within final_results ---
-                if "globalTags" in final_results and isinstance(final_results["globalTags"], dict):
-                    manifest_global_tags_data = final_results["globalTags"]
-                    
-                    if self.manifest.global_tags is None:
-                        self.manifest.global_tags = {"persons": [], "actions": [], "objects": []}
-
-                    # Ensure that the manifest.global_tags are updated with lists
-                    self.manifest.global_tags["persons"] = manifest_global_tags_data.get("persons", [])
-                    self.manifest.global_tags["actions"] = manifest_global_tags_data.get("actions", [])
-                    self.manifest.global_tags["objects"] = manifest_global_tags_data.get("objects", [])
-                    logger.debug("Updated self.manifest.global_tags using data from custom aggregation's globalTags.")
-                else:
-                    # This warning now means the custom aggregation (ActionSummary) itself didn't produce globalTags
-                    logger.warning("Custom aggregation result (e.g., ActionSummary output) missing 'globalTags' key or it's not a dict. Manifest global_tags not updated.")
+                # --- REMOVE manifest.global_tags update (no longer needed) ---
+                # if "globalTags" in final_results and isinstance(final_results["globalTags"], dict):
+                #     manifest_global_tags_data = final_results["globalTags"]
+                #     if self.manifest.global_tags is None:
+                #         self.manifest.global_tags = {"persons": [], "actions": [], "objects": []}
+                #     self.manifest.global_tags["persons"] = manifest_global_tags_data.get("persons", [])
+                #     self.manifest.global_tags["actions"] = manifest_global_tags_data.get("actions", [])
+                #     self.manifest.global_tags["objects"] = manifest_global_tags_data.get("objects", [])
+                #     logger.debug("Updated self.manifest.global_tags using data from custom aggregation's globalTags.")
+                # else:
+                #     logger.warning("Custom aggregation result (e.g., ActionSummary output) missing 'globalTags' key or it's not a dict. Manifest global_tags not updated.")
             
             elif isinstance(processed_results, list): # This branch now handles non-custom agg OR refine
                 # --- Apply Generic Aggregation to the list of segment results ---
@@ -759,9 +757,13 @@ class VideoAnalyzer:
 
 
                 # Save the results
+                run_timestamp = self.manifest.processing_params.run_timestamp
+                filename_suffix = f"_{run_timestamp}" if run_timestamp else ""
+                final_results_filename = f"_{analysis_config.name}{filename_suffix}.json"
+
                 final_results_output_path = os.path.join(
                     self.manifest.processing_params.output_directory,
-                    f"_{analysis_config.name}.json",
+                    final_results_filename,
                 )
                 logger.info(f"Writing final results structure to {final_results_output_path}")
                 os.makedirs(os.path.dirname(final_results_output_path), exist_ok=True)
@@ -785,7 +787,7 @@ class VideoAnalyzer:
         # Save final manifest (contains URLs now)
         write_video_manifest(self.manifest)
 
-        # --- Inject runtime into action summary if ActionSummary config is used ---
+        # --- Inject runtime into action summary if ActionSummary config is used --- 
         # --- FIX: Don't re-call process_segment_results. Update existing dict. ---
         # If we already ran custom aggregation (which populates final_results as a dict)
         # and it's the ActionSummary config, just update its runtime fields.
@@ -793,33 +795,48 @@ class VideoAnalyzer:
             analysis_config.name == "ActionSummary" and
             isinstance(final_results, dict)): # Check if final_results is a dict (it should be if ActionSummary ran)
 
-            logger.info("Injecting final runtime into existing actionSummary output.")
+            logger.info("Injecting final runtime and additional metadata into existing actionSummary output.")
             
             # The final_results *is* the action summary dictionary here.
-            # No need for .get("actionSummary") if final_results is already it.
-            target_dict_for_runtime = final_results 
+            # If actionSummary is a sub-key, target that. Otherwise, target final_results directly.
+            if "actionSummary" in final_results and isinstance(final_results["actionSummary"], dict):
+                target_dict_for_processing_info = final_results["actionSummary"]
+            else:
+                target_dict_for_processing_info = final_results 
 
-            if isinstance(target_dict_for_runtime, dict):
-                 if "processing_info" not in target_dict_for_runtime:
-                      target_dict_for_runtime["processing_info"] = {}
+            if isinstance(target_dict_for_processing_info, dict):
+                 if "processing_info" not in target_dict_for_processing_info or not isinstance(target_dict_for_processing_info.get("processing_info"), dict):
+                      target_dict_for_processing_info["processing_info"] = {}
                  
                  # Ensure elapsed_time exists, calculate if not (e.g. if error before its calculation)
                  if 'elapsed_time' not in locals():
                      elapsed_time = time.time() - stopwatch_start_time
 
+                 # Add/Update runtime and tokens (already partially done by ActionSummary.process_segment_results)
+                 target_dict_for_processing_info["processing_info"]["runtime_seconds"] = round(elapsed_time, 3)
                  try:
                      from .cobra_utils import seconds_to_iso8601_duration
-                     target_dict_for_runtime["processing_info"]["runtime_iso8601"] = seconds_to_iso8601_duration(elapsed_time)
+                     target_dict_for_processing_info["processing_info"]["runtime_iso8601"] = seconds_to_iso8601_duration(elapsed_time)
                  except ImportError:
                      logger.warning("Warning: cobra_utils not found for runtime formatting. Using basic format for ISO.")
-                     target_dict_for_runtime["processing_info"]["runtime_iso8601"] = f"PT{elapsed_time:.3f}S"
+                     target_dict_for_processing_info["processing_info"]["runtime_iso8601"] = f"PT{elapsed_time:.3f}S"
+                 target_dict_for_processing_info["processing_info"]["tokens_used"] = self.token_usage # Final token usage
 
-                 target_dict_for_runtime["processing_info"]["runtime_seconds"] = round(elapsed_time, 3)
-                 # Also update the tokens in processing_info if ActionSummary is the direct output
-                 target_dict_for_runtime["processing_info"]["tokens_used"] = self.token_usage
+                 # --- ADD NEW METADATA --- 
+                 target_dict_for_processing_info["processing_info"]["source_asset_name"] = self.manifest.name
+                 target_dict_for_processing_info["processing_info"]["source_asset_path"] = self.manifest.source_video.path
+                 target_dict_for_processing_info["processing_info"]["source_asset_location_type"] = "blob_storage" if self.video_blob_url else "local"
+                 
+                 yolo_model_name = "YOLOv11x" # Assuming this is the model, as it's a default in run_yolo
+                 schema_detail = f"({'Refined' if self.using_refined_tags else 'Raw'})"
+                 gpt_model_name = self.env.vision.deployment or "GPT-Vision"
+                 target_dict_for_processing_info["processing_info"]["schema_used"] = f"{yolo_model_name} {schema_detail} + {gpt_model_name}"
+                 target_dict_for_processing_info["processing_info"]["run_timestamp"] = self.manifest.processing_params.run_timestamp
+                 # tag_statistics are already added by ActionSummary.process_segment_results
+                 # --- END NEW METADATA --- 
 
             else:
-                 logger.warning(f"Warning: Expected 'final_results' to be a dict for ActionSummary, but got {type(target_dict_for_runtime)}. Cannot inject runtime.")
+                 logger.warning(f"Warning: Expected target for processing_info to be a dict, but got {type(target_dict_for_processing_info)}. Cannot inject additional metadata.")
 
 
         # --- END FIX ---
@@ -835,7 +852,11 @@ class VideoAnalyzer:
             # Ensure final_results is defined; it might be set in different branches
             final_results_for_report = final_results if 'final_results' in locals() else {}
             elapsed_time_for_report = elapsed_time if 'elapsed_time' in locals() else (time.time() - stopwatch_start_time)
-            output_path_for_report = final_results_output_path if 'final_results_output_path' in locals() else "N/A"
+            # final_results_output_path is already defined and timestamped if run_timestamp exists
+            output_path_for_report = final_results_output_path if 'final_results_output_path' in locals() else os.path.join(
+                self.manifest.processing_params.output_directory,
+                f"_{analysis_config.name}_unknown_timestamp.json" # Fallback name if path wasn't set
+            ) 
             
             report_data = self._gather_report_data(
                 final_results_for_report, 
@@ -848,6 +869,23 @@ class VideoAnalyzer:
         except Exception as report_e:
             logger.warning(f"Failed to generate analysis summary report: {report_e}")
         # --- END ADDED ---
+
+        # At the end of the run, write the prompt log to a markdown file
+        output_dir = self.manifest.processing_params.output_directory
+        run_timestamp = self.manifest.processing_params.run_timestamp
+        prompt_log_path = os.path.join(output_dir, f"run_prompts_{run_timestamp}.md")
+        try:
+            with open(prompt_log_path, "w", encoding="utf-8") as f:
+                f.write(f"# LLM Prompts for Run {run_timestamp}\n\n")
+                for i, entry in enumerate(self.prompt_log):
+                    f.write(f"## Prompt {i+1}: {entry['type']}\n")
+                    f.write(f"**Context:** {json.dumps(entry['context'], indent=2)}\n\n")
+                    f.write("```json\n")
+                    f.write(json.dumps(entry['messages'], indent=2))
+                    f.write("\n```)\n\n")
+            logger.info(f"Prompt log written to {prompt_log_path}")
+        except Exception as e:
+            logger.error(f"Failed to write prompt log: {e}")
 
         return final_results
 
@@ -1853,7 +1891,8 @@ class VideoAnalyzer:
             total_chars = 0
         return total_chars // 4
 
-    def _call_llm(self, messages, model="gpt-3.5-turbo", log_token_category=None):
+    def _call_llm(self, messages, model="gpt-3.5-turbo", log_token_category=None, prompt_type=None, context=None):
+        self._log_prompt(prompt_type or log_token_category or "unknown", context or {}, messages)
         # Revert to user's original structure for calling Azure/OpenAI models
         # Use AzureOpenAI or AsyncAzureOpenAI clients as before
         # Token logging and counting logic is preserved
@@ -1934,7 +1973,8 @@ class VideoAnalyzer:
             logger.debug(f"[TOKENS] Uncategorized: prompt={prompt_tokens}, completion={completion_tokens}, images={image_tokens}, total={total_with_images}")
         return response
 
-    async def _call_llm_async(self, messages, model="gpt-3.5-turbo", log_token_category=None):
+    async def _call_llm_async(self, messages, model="gpt-3.5-turbo", log_token_category=None, prompt_type=None, context=None):
+        self._log_prompt(prompt_type or log_token_category or "unknown", context or {}, messages)
         # Revert to user's original structure for async Azure/OpenAI calls
         try:
             from openai import AsyncAzureOpenAI
@@ -2082,52 +2122,142 @@ class VideoAnalyzer:
         return self._internal_async_client
 
     # --- ADDED: Placeholder for _gather_report_data ---
-    def _gather_report_data(self, final_results: Dict[str, Any], analysis_name: str, elapsed_time: float, output_path: str) -> Dict[str, Any]:
-        """Gathers data for the summary report. Placeholder implementation."""
-        logger.info(f"Placeholder: _gather_report_data called for {analysis_name}. Data would be gathered here.")
-        # Example data structure
+    def _gather_report_data(self, final_results: Dict[str, Any], analysis_config_name: str, elapsed_time: float, output_json_path: str) -> Dict[str, Any]:
+        """Gathers detailed data for the summary report."""
+        logger.info(f"Gathering detailed report data for {analysis_config_name}...")
+        
+        # Determine schema used
+        yolo_model_name = "YOLOv11x" # Assuming this is the model, as it's a default in run_yolo
+        schema_detail = f"({'Refined' if self.using_refined_tags else 'Raw'})"
+        gpt_model_name = self.env.vision.deployment or "GPT-Vision"
+        schema_used = f"{yolo_model_name} {schema_detail} + {gpt_model_name}"
+
         report_data = {
-            "analysis_name": analysis_name,
-            "video_name": self.manifest.name,
-            "video_duration": self.manifest.source_video.duration,
-            "analysis_runtime_seconds": elapsed_time,
-            "results_output_path": output_path,
-            "total_segments_processed": len(self.manifest.segments),
-            "token_usage": self.token_usage,
-            "errors_encountered": "No specific errors tracked in this placeholder.", # Placeholder
-            "summary_of_findings": final_results.get("summary", "Summary not available."), # or actionSummary.summary
-            "key_tags_found": {
-                "persons": len(final_results.get("globalTags", {}).get("persons", [])),
-                "actions": len(final_results.get("globalTags", {}).get("actions", [])),
-                "objects": len(final_results.get("globalTags", {}).get("objects", []))
+            "general_info": {
+                "source_asset_name": self.manifest.name,
+                "source_asset_path": self.manifest.source_video.path,
+                "source_asset_location_type": "blob_storage" if self.video_blob_url else "local", # Added location type
+                "output_json_path": output_json_path,
+                "llm_deployment_name": self.env.vision.deployment,
+                "schema_used": schema_used, # ADDED schema used
+                "analysis_config_name": analysis_config_name,
+                "run_timestamp": self.manifest.processing_params.run_timestamp,
+                "prompts_log_file": f"run_prompts_{self.manifest.processing_params.run_timestamp}.md"
+            },
+            "token_usage": self.token_usage.copy(), # MODIFIED: Include the full token_usage dictionary
+            "processing_time": {
+                "total_analysis_runtime_seconds": round(elapsed_time, 3),
+                "total_analysis_runtime_iso8601": seconds_to_iso8601_duration(elapsed_time),
+                "per_step_timings_note": "Detailed per-step processing times are not yet implemented in this report version."
+            },
+            "tags_summary": {
+                "total_unique_persons": 0,
+                "total_unique_actions": 0,
+                "total_unique_objects": 0,
+                "detailed_tags": {} # Will store per-tag stats
+            },
+            "transcription_summary": {
+                "status": "Not available or not processed"
             }
         }
+
+        # Populate tags_summary
+        tags_data = {}
+        if "actionSummary" in final_results and isinstance(final_results["actionSummary"], dict):
+            action_summary_content = final_results["actionSummary"]
+            tags_data = {
+                "persons": action_summary_content.get("person", []),
+                "actions": action_summary_content.get("action", []),
+                "objects": action_summary_content.get("object", [])
+            }
+        elif "globalTags" in final_results and isinstance(final_results["globalTags"], dict):
+            tags_data = final_results["globalTags"]
+        
+        for category in ["persons", "actions", "objects"]:
+            category_tags = tags_data.get(category, [])
+            if not isinstance(category_tags, list): continue
+
+            unique_tag_names_in_category = set()
+            
+            for tag_info in category_tags:
+                if not isinstance(tag_info, dict): continue
+                tag_name = tag_info.get("classDescription") or tag_info.get("name")
+                if not tag_name: continue
+                
+                unique_tag_names_in_category.add(tag_name)
+
+                if tag_name not in report_data["tags_summary"]["detailed_tags"]:
+                    report_data["tags_summary"]["detailed_tags"][tag_name] = {
+                        "category": category,
+                        "instance_count": 0,
+                        "total_duration_seconds": 0.0
+                    }
+                
+                report_data["tags_summary"]["detailed_tags"][tag_name]["instance_count"] += len(tag_info.get("timecodes", []))
+                for tc in tag_info.get("timecodes", []):
+                    if isinstance(tc, dict) and "start" in tc and "end" in tc:
+                        try:
+                            start_s = str(tc["start"]).rstrip("s")
+                            end_s = str(tc["end"]).rstrip("s")
+                            start_f = float(start_s)
+                            end_f = float(end_s)
+                            report_data["tags_summary"]["detailed_tags"][tag_name]["total_duration_seconds"] += (end_f - start_f)
+                        except ValueError:
+                            logger.warning(f"Could not parse timecode duration for tag '{tag_name}': {tc}")
+            report_data["tags_summary"][f"total_unique_{category}"] = len(unique_tag_names_in_category)
+        
+        if self.manifest.audio_transcription and isinstance(self.manifest.audio_transcription, dict):
+            recognized_phrases = self.manifest.audio_transcription.get("recognizedPhrases", [])
+            report_data["transcription_summary"]["status"] = "Processed"
+            report_data["transcription_summary"]["number_of_phrases"] = len(recognized_phrases)
+            
+            total_confidence = 0
+            valid_confidences = 0
+            detected_languages = set()
+            speakers = set()
+
+            for phrase in recognized_phrases:
+                if isinstance(phrase, dict):
+                    if "confidence" in phrase:
+                        total_confidence += phrase["confidence"]
+                        valid_confidences += 1
+                    if "language" in phrase:
+                        detected_languages.add(phrase["language"])
+                    if "speaker" in phrase:
+                        speakers.add(str(phrase["speaker"])) # Ensure speaker ID is string
+
+            if valid_confidences > 0:
+                report_data["transcription_summary"]["average_confidence"] = round(total_confidence / valid_confidences, 3)
+            if detected_languages:
+                report_data["transcription_summary"]["detected_languages"] = sorted(list(detected_languages))
+            if speakers:
+                report_data["transcription_summary"]["number_of_speakers"] = len(speakers)
+        
         return report_data
-    # --- END ADDED ---
 
     # --- ADDED: Placeholder for _write_summary_report ---
     def _write_summary_report(self, report_data: Dict[str, Any]) -> None:
-        """Writes the summary report. Placeholder implementation."""
+        """Writes the detailed summary report to a text file."""
+        run_timestamp = self.manifest.processing_params.run_timestamp
+        filename_suffix = f"_{run_timestamp}" if run_timestamp else ""
+        # analysis_config_name = report_data.get("general_info", {}).get('analysis_config_name', 'Generic') # REMOVED
+        # analysis_name_for_file = analysis_config_name.replace(' ', '_') # REMOVED
+        video_name_for_file = self.manifest.name.replace(' ', '_').split('.')[0]
+
+        report_base_name = f"AnalysisReport_{video_name_for_file}" # MODIFIED
         report_path = os.path.join(
             self.manifest.processing_params.output_directory,
-            # Use a consistent naming convention for the report file
-            f"AnalysisReport_{self.manifest.name}_{report_data.get('analysis_name', 'Generic')}.txt"
+            f"{report_base_name}{filename_suffix}.json"
         )
-        logger.info(f"Writing analysis summary report to {report_path}")
+        logger.info(f"Writing detailed analysis summary report to {report_path}")
+        
         try:
             with open(report_path, "w", encoding="utf-8") as f:
-                f.write("--- Analysis Summary Report (Placeholder) ---\n\n")
-                for key, value in report_data.items():
-                    if isinstance(value, dict):
-                        f.write(f"{key.replace('_', ' ').title()}:\n")
-                        for sub_key, sub_value in value.items():
-                            f.write(f"  {sub_key.replace('_', ' ').title()}: {sub_value}\n")
-                    else:
-                        f.write(f"{key.replace('_', ' ').title()}: {value}\n")
-                f.write("\n--- End of Report ---")
-            logger.info(f"Placeholder report written to {report_path}")
+                # MODIFIED: Use json.dump to write the report_data dictionary as JSON
+                json.dump(report_data, f, indent=4, ensure_ascii=False)
+            logger.info(f"Detailed summary report written to {report_path}")
         except Exception as e:
-            logger.error(f"Placeholder: Failed to write summary report: {e}")
+            logger.error(f"Failed to write detailed summary report: {e}", exc_info=True)
     # --- END ADDED ---
 
     # --- ADDED: System prompt for granular action extraction ---
@@ -2378,5 +2508,13 @@ If no actions are detected in the provided frames, return:
                      f"image_tokens (explicit image part only)={self.token_usage['image_tokens']}, "
                      f"total_tokens (sum of prompt & completion costs)={self.token_usage['total_tokens']}")
     # --- END ADDED METHOD ---
+
+    def _log_prompt(self, prompt_type, context, messages):
+        """Append a prompt to the prompt_log for this run."""
+        self.prompt_log.append({
+            "type": prompt_type,
+            "context": context,
+            "messages": messages
+        })
 
 

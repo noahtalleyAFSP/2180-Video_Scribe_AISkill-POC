@@ -70,6 +70,7 @@ class TargetPreprocessingParameters(BaseModel):
     allow_partial_segments: Optional[bool] = True
     use_speech_based_segments: Optional[bool] = False
     downscaled_resolution: Optional[List[int]] = None
+    run_timestamp: Optional[str] = None
 
 
 class VideoManifest(BaseModel):

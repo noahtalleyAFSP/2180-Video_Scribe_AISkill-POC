@@ -87,7 +87,7 @@ class VideoClient:
             max_workers=max_workers,
             trim_to_nearest_second=trim_to_nearest_second,
             allow_partial_segments=allow_partial_segments,
-            overwrite_output=overwrite_output,
+            overwrite_output=False,
             use_speech_based_segments=use_speech_based_segments,
             use_scene_detection=use_scene_detection,
             scene_detection_threshold=scene_detection_threshold,

@@ -35,7 +35,8 @@ def run_yolo(video_path: Path, out_dir: Path,
              model_path: str = "yolo11x.pt",
              tracker_yaml: str = "bytetrack.yaml",
              conf: float = 0.20, iou: float = 0.80,
-             skip_thumbnail_saving: bool = False) -> List[Dict[str, Any]]:
+             skip_thumbnail_saving: bool = False,
+             meta=None) -> List[Dict[str, Any]]:
     """
     Processes a video file, performs object tracking, and returns detailed track information.
 
@@ -208,11 +209,11 @@ def run_yolo(video_path: Path, out_dir: Path,
     processing_time = time.time() - t_start_yolo_processing
     print(f"YOLO tracking for {video_path.name} completed in {processing_time:.2f}s. Found {len(raw_yolo_output_list)} raw tracks.")
     
-    # Optional: Save this detailed list as a JSON file for debugging
-    # debug_json_path = out_dir / f"{video_path.stem}_yolo_raw_detailed.json"
-    # with open(debug_json_path, "w") as f:
-    #     json.dump(raw_yolo_output_list, f, indent=2)
-    # print(f"Saved detailed raw YOLO tracking to {debug_json_path}")
+    # --- Telemetry: Store model and frame count in meta if provided ---
+    if meta:
+        meta.set("model.yoloWeights", model_path)
+        meta.set("processing.yolo_frames", frame_idx)
+    # --- End Telemetry ---
 
     return raw_yolo_output_list
 

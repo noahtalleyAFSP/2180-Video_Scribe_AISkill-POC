@@ -262,192 +262,172 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
         if "objects" not in result_dict["globalTags"]:
             result_dict["globalTags"]["objects"] = []
 
-    def process_segment_results(self, enriched_segment_results: List[Dict[str, Any]], manifest: "VideoManifest", env: "CobraEnvironment", parsed_copyright_info: Optional[Dict] = None, runtime_seconds: Optional[float] = None, tokens: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    def process_segment_results(  # noqa: C901  (complex, but OK here)
+        self,
+        enriched_segment_results: List[Dict[str, Any]],
+        manifest: "VideoManifest",
+        env: "CobraEnvironment",
+        parsed_copyright_info: Optional[Dict[str, Any]] = None,
+        runtime_seconds: Optional[float] = None,
+        tokens: Optional[Dict[str, int]] = None,
+        meta: Any = None,
+    ) -> Dict[str, Any]:
         """
-        Processes results from multiple segments, merging chapters and aggregating globalTags.
-        Now includes dedicated handling for 'extracted_actions' from segments.
+        Merge chapters and tag time-codes across all segments, calculate simple
+        statistics, and return a ready-to-serialize dict under the single key
+        ``actionSummary``.
         """
-        final_results: Dict[str, Any] = {
-            "chapters": [],
-            "globalTags": {
-                "persons": [],
-                "actions": [],
-                "objects": [],
-                # Potentially other global tag categories if defined
-            },
-            "processing_info": {
-                "processed_segments": len(enriched_segment_results),
-                "runtime_seconds": runtime_seconds,
-                "tokens_used": tokens,
-                "copyright_info_applied": bool(parsed_copyright_info)
+        # -- Initialise skeleton ---------------------------------------
+        action_summary_output: Dict[str, Any] = {
+            "actionSummary": {
+                "processing_info": {
+                    "tag_statistics": {
+                        "instance_counts": {},
+                        "total_durations_seconds": {},
+                    }
+                },
+                "copyright_info": parsed_copyright_info or {},
+                "video_title": manifest.name,
+                "video_duration_seconds": manifest.source_video.duration,
+                "video_duration_iso": manifest.source_video.duration_iso,
+                "chapter": [], "person": [], "action": [], "object": [],
             }
         }
-        
-        # Hold all tags before aggregation to handle potential duplicates from different sources/segments
-        all_persons_intermediate = []
-        all_objects_intermediate = []
-        all_actions_intermediate = [] # For merging tags from LLM and dedicated extraction
 
-        # Temporary sets to track unique tag names encountered during segment processing
-        # This helps in adding to manifest.global_tags only unique names
-        current_run_persons = set(manifest.global_tags.get("persons", []))
-        current_run_actions = set(manifest.global_tags.get("actions", []))
-        current_run_objects = set(manifest.global_tags.get("objects", []))
+        # Hold all tag appearances {category: {name: {"attributes":…, intervals:[…]}}}
+        aggregated: Dict[str, Dict[str, Any]] = {
+            "persons": defaultdict(lambda: {"attributes": {}, "intervals": []}),
+            "actions": defaultdict(lambda: {"attributes": {}, "intervals": []}),
+            "objects": defaultdict(lambda: {"attributes": {}, "intervals": []}),
+        }
 
-        for segment_result_envelope in enriched_segment_results:
-            # Get the LLM output using the correct key
-            segment_llm_output = segment_result_envelope.get("analysisResult") # CORRECTED KEY
-            
-            # Get the segment object
-            segment_obj: Optional["Segment"] = segment_result_envelope.get("segment_object") # NEW - requires change in video_analyzer.py
-            segment_name_for_log = segment_result_envelope.get("segmentName", "Unknown") # Fallback if segment_obj is not there yet
+        chapters: List[Dict[str, Any]] = []
 
-            if not segment_llm_output:
-                logger.warning(f"Segment {segment_name_for_log} had no LLM output (analysisResult) to process.")
+        # -- Walk every segment result ---------------------------------
+        for idx, container in enumerate(enriched_segment_results):
+            if not isinstance(container, dict):
+                logger.warning("Segment %d is not a dict – skipped.", idx)
                 continue
-            
-            # Ensure the basic structure exists in the LLM output
-            self._ensure_tags_structure(segment_llm_output)
 
-            # Process chapters
-            if "chapters" in segment_llm_output and isinstance(segment_llm_output["chapters"], list):
-                for chapter in segment_llm_output["chapters"]:
-                    try:
-                        # Attempt to convert "start" and "end" times to float if they are strings
-                        if isinstance(chapter.get("start"), str):
-                            chapter["start"] = float(chapter["start"].replace("s", ""))
-                        if isinstance(chapter.get("end"), str):
-                            chapter["end"] = float(chapter["end"].replace("s", ""))
-                        
-                        # Add dominant colors if available from segment object
-                        if segment_obj and segment_obj.dominant_colors_hex: # Check if segment_obj is not None
-                            chapter["dominantColorsHex"] = segment_obj.dominant_colors_hex
+            segment: Optional[Segment] = container.get("segment_object")  # type: ignore
+            if not segment:
+                logger.warning("Missing 'segment_object' in container %d.", idx)
+                continue
 
-                        final_results["chapters"].append(chapter)
-                    except ValueError as e:
-                        logger.error(f"Could not convert chapter start/end time to float for segment {segment_name_for_log}: {chapter}. Error: {e}")
-                    except Exception as e:
-                        logger.error(f"Error processing chapter for segment {segment_name_for_log}: {chapter}. Error: {e}")
-            
-            # Process globalTags from LLM
-            segment_tags = segment_llm_output.get("globalTags", {})
-            if segment_tags: # Check if segment_tags is not None
-                for tag_type in ["persons", "objects", "actions"]:
-                    if tag_type in segment_tags and isinstance(segment_tags[tag_type], list):
-                        for tag_entry in segment_tags[tag_type]:
-                            if isinstance(tag_entry, dict) and "classDescription" in tag_entry and "timecodes" in tag_entry:
-                                if tag_type == "persons":
-                                    all_persons_intermediate.append(tag_entry)
-                                    current_run_persons.add(tag_entry["classDescription"])
-                                elif tag_type == "objects":
-                                    all_objects_intermediate.append(tag_entry)
-                                    current_run_objects.add(tag_entry["classDescription"])
-                                elif tag_type == "actions": # Actions from main LLM tagging
-                                    all_actions_intermediate.append(tag_entry)
-                                    current_run_actions.add(tag_entry["classDescription"])
-                            else:
-                                logger.warning(f"Malformed tag entry in segment_tags for type {tag_type} in segment {segment_name_for_log}: {tag_entry}")
-            
-            # Process 'extracted_actions' from the segment object (new granular extraction)
-            if segment_obj and hasattr(segment_obj, 'extracted_actions') and segment_obj.extracted_actions: # Check if segment_obj is not None
-                logger.debug(f"Processing {len(segment_obj.extracted_actions)} extracted_actions for segment {segment_obj.segment_name}")
-                for action_entry in segment_obj.extracted_actions:
-                    if isinstance(action_entry, dict) and "classDescription" in action_entry and "timecodes" in action_entry:
-                        all_actions_intermediate.append(action_entry) # Add to the same intermediate list
-                        current_run_actions.add(action_entry["classDescription"])
-                    else:
-                        logger.warning(f"Malformed extracted_action entry for segment {segment_obj.segment_name}: {action_entry}")
+            analysis = container.get("analysisResult", {})
 
-        # Sort chapters by start time
-        final_results["chapters"].sort(key=lambda x: x.get("start", float('inf')))
+            # ---- CHAPTERS ----
+            seg_chapters = analysis.get("chapters", [])
+            if isinstance(seg_chapters, list) and seg_chapters:
+                chap = seg_chapters[0].copy()
+                chap["start"] = f"{segment.start_time:.3f}s"
+                chap["end"] = f"{segment.end_time:.3f}s"
+                chap.setdefault("segment_name", segment.segment_name)
+                chapters.append(chap)
+            elif "summary" in analysis:
+                chapters.append(
+                    {
+                        "start": f"{segment.start_time:.3f}s",
+                        "end": f"{segment.end_time:.3f}s",
+                        "segment_name": segment.segment_name,
+                        "summary": analysis["summary"],
+                        "shotType": analysis.get("shotType", []),
+                        "shotDescription": analysis.get("shotDescription", ""),
+                    }
+                )
 
-        # Aggregate and merge timecodes for all tag types
-        # The _aggregate_tag_timestamps method should handle string timecodes like "0.000s"
-        # and convert them internally or expect them to be numeric.
-        # Let's ensure they are strings as per its original design.
-        
-        def convert_timecodes_to_str_format(tag_list):
-            for tag in tag_list:
-                if "timecodes" in tag and isinstance(tag["timecodes"], list):
-                    new_timecodes = []
-                    for tc in tag["timecodes"]:
-                        try:
-                            start_val = tc['start']
-                            end_val = tc['end']
-                            # Ensure they are strings ending with 's'
-                            start_str = f"{float(str(start_val).replace('s','')):.3f}s" if isinstance(start_val, (str, float, int)) else start_val
-                            end_str = f"{float(str(end_val).replace('s','')):.3f}s" if isinstance(end_val, (str, float, int)) else end_val
-                            new_timecodes.append({"start": start_str, "end": end_str})
-                        except (ValueError, TypeError, KeyError) as e:
-                            logger.warning(f"Skipping malformed timecode {tc} during string conversion: {e}")
-                    tag["timecodes"] = new_timecodes
-            return tag_list
+            # ---- TAGS ----
+            seg_tags = analysis.get("globalTags", {})
+            if not isinstance(seg_tags, dict):
+                continue
 
-        all_persons_intermediate = convert_timecodes_to_str_format(all_persons_intermediate)
-        all_objects_intermediate = convert_timecodes_to_str_format(all_objects_intermediate)
-        all_actions_intermediate = convert_timecodes_to_str_format(all_actions_intermediate)
+            for cat in ("persons", "actions", "objects"):
+                for entry in seg_tags.get(cat, []):
+                    if not isinstance(entry, dict):
+                        continue
+                    name = (entry.get("classDescription") or entry.get("name") or "").strip()
+                    if not name:
+                        continue
 
-        aggregated_persons = self._aggregate_tag_timestamps({"persons": all_persons_intermediate})
-        aggregated_objects = self._aggregate_tag_timestamps({"objects": all_objects_intermediate})
-        aggregated_actions = self._aggregate_tag_timestamps({"actions": all_actions_intermediate}) # Now includes dedicated extracted actions
+                    # Convert time-codes → numeric intervals
+                    aggregated[cat][name]["intervals"].extend(
+                        self._timecodes_to_intervals_action_summary(entry.get("timecodes", []))
+                    )
+                    # Capture *static* attributes exactly once
+                    for k, v in entry.items():
+                        if k in ("timecodes", "classDescription", "name"):
+                            continue
+                        aggregated[cat][name]["attributes"].setdefault(k, v)
 
-        final_results["globalTags"]["persons"] = aggregated_persons.get("persons", [])
-        final_results["globalTags"]["objects"] = aggregated_objects.get("objects", [])
-        final_results["globalTags"]["actions"] = aggregated_actions.get("actions", [])
+            # ---- INTEGRATE extracted_actions for this segment ----
+            if hasattr(segment, "extracted_actions") and segment.extracted_actions:
+                for entry in segment.extracted_actions:
+                    if not isinstance(entry, dict):
+                        continue
+                    name = (entry.get("classDescription") or entry.get("name") or "").strip()
+                    if not name:
+                        continue
+                    aggregated["actions"][name]["intervals"].extend(
+                        self._timecodes_to_intervals_action_summary(entry.get("timecodes", []))
+                    )
+                    for k, v in entry.items():
+                        if k in ("timecodes", "classDescription", "name"):
+                            continue
+                        aggregated["actions"][name]["attributes"].setdefault(k, v)
 
+        # -- Finalise CHAPTERS -----------------------------------------
+        action_summary_output["actionSummary"]["chapter"] = sorted(
+            chapters, key=lambda c: float(str(c["start"]).rstrip("s"))
+        )
 
-        # Update manifest's global_tags with any newly discovered tag names (unique)
-        # These are just the names, not the timecodes, used for subsequent prompting if needed.
-        if not manifest.global_tags: # Initialize if it's None
-            manifest.global_tags = {"persons": [], "actions": [], "objects": []}
-        
-        # Ensure each key exists before trying to extend
-        for key in ["persons", "actions", "objects"]:
-            if key not in manifest.global_tags:
-                manifest.global_tags[key] = []
+        # -- Finalise TAGS and statistics ------------------------------
+        stats = action_summary_output["actionSummary"]["processing_info"]["tag_statistics"]
+        final_tags: Dict[str, List[Dict[str, Any]]] = {c: [] for c in ("persons", "actions", "objects")}
 
-        # Add new unique names to the manifest's global_tags lists
-        # These are used for providing known entities to the LLM in subsequent calls.
-        # The `current_run_persons/actions/objects` sets now contain all unique names from this run.
-        
-        # Example of updating manifest.global_tags:
-        # For persons:
-        # existing_manifest_persons = set(manifest.global_tags.get("persons", []))
-        # new_persons_to_add = list(current_run_persons - existing_manifest_persons)
-        # if new_persons_to_add:
-        # manifest.global_tags["persons"].extend(new_persons_to_add)
-        # manifest.global_tags["persons"] = sorted(list(set(manifest.global_tags["persons"]))) # Keep unique and sorted
+        for cat, tag_map in aggregated.items():
+            for name, store in tag_map.items():
+                merged = self._merge_overlapping_intervals_action_summary(store["intervals"])
+                tag_json = {
+                    "classDescription": name,
+                    **store["attributes"],
+                    "timecodes": [{"start": f"{s:.3f}s", "end": f"{e:.3f}s"} for s, e in merged],
+                }
+                final_tags[cat].append(tag_json)
 
-        # Consolidate unique tag names for the manifest (not the final_results JSON)
-        # The manifest.global_tags are simple lists of names.
-        manifest.global_tags["persons"] = sorted(list(current_run_persons))
-        manifest.global_tags["actions"] = sorted(list(current_run_actions))
-        manifest.global_tags["objects"] = sorted(list(current_run_objects))
+                # update statistics
+                stats["instance_counts"][name] = len(merged)
+                stats["total_durations_seconds"][name] = round(sum(e - s for s, e in merged), 3)
 
-        logger.info(f"Final aggregated persons: {len(final_results['globalTags']['persons'])}")
-        logger.info(f"Final aggregated objects: {len(final_results['globalTags']['objects'])}")
-        logger.info(f"Final aggregated actions: {len(final_results['globalTags']['actions'])}") # Log count of aggregated actions
+            # sort tags (first appearance, then alpha)
+            def _key(t):
+                return (
+                    float(str(t["timecodes"][0]["start"]).rstrip("s")) if t["timecodes"] else float("inf"),
+                    t["classDescription"].lower(),
+                )
 
-        # Update the class-level known_tags for potential use in other parts of the system or future runs,
-        # though instance-level VideoAnalyzer._current_known_persons etc. are primary for per-segment prompting
-        ActionSummary.known_tags["persons"].update(current_run_persons)
-        ActionSummary.known_tags["actions"].update(current_run_actions)
-        ActionSummary.known_tags["objects"].update(current_run_objects)
+            final_tags[cat].sort(key=_key)
 
-        return final_results
+        # Attach tags
+        action_summary_output["actionSummary"].update(
+            {"person": final_tags["persons"], "action": final_tags["actions"], "object": final_tags["objects"]}
+        )
+
+        # -- Runtime / token bookkeeping --------------------------------
+        if runtime_seconds is not None:
+            info = action_summary_output["actionSummary"]["processing_info"]
+            info["runtime_seconds"] = runtime_seconds
+            info["runtime_iso8601"] = seconds_to_iso8601_duration(runtime_seconds)
+
+        if tokens is not None:
+            action_summary_output["actionSummary"]["processing_info"]["tokens_used"] = tokens
+
+        logger.info("ActionSummary.process_segment_results - aggregation complete.")
+        return action_summary_output
+
 
     @staticmethod
     def _timecodes_to_intervals_action_summary(timecodes: List[Any]) -> List[List[float]]:
-        """
-        Normalises various timecode formats into [start, end] float pairs.
-        Accepts:
-            - {"start": "...s","end":"...s"} dicts
-            - {"start": float/int,"end": float/int} dicts
-            - plain floats / ints (treated as single frame, extended by 0.001s)
-            - "12.345s" strings (treated as single frame, extended by 0.001s)
-        Returns a list of [start, end] pairs (floats, 3 dp), sorted by start time.
-        Invalid formats are logged and skipped.
-        """
+        """Correctly formatted docstring. This method normalizes timecodes."""
         intervals = []
         for tc in timecodes:
             try:
@@ -485,8 +465,8 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
     def _merge_overlapping_intervals_action_summary(intervals: List[List[float]], max_gap: float = 0.5) -> List[List[float]]:
         """
         Merges touching, overlapping, or nearly-touching time intervals.
-        max_gap: Maximum gap in seconds to bridge between intervals.
-        Assumes intervals are already sorted by start time.
+        The 'max_gap' parameter defines the maximum gap in seconds to bridge between intervals.
+        This method assumes the input 'intervals' list is already sorted by start time.
         """
         if not intervals:
             return []
@@ -508,9 +488,9 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
 
     def _aggregate_tag_timestamps(self, tag_dict: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Aggregates and merges timecodes for each tag type.
-        For 'persons', groups by 'id', merges timecodes, and uses the first encountered description and metadata.
-        For 'objects' and 'actions', groups by 'classDescription' and merges timecodes.
+        Aggregates and merges timecodes for each tag category (persons, objects, actions).
+        For 'persons', it groups by 'id', merges their timecodes, and uses the first encountered description and metadata.
+        For 'objects' and 'actions', it groups by 'classDescription' and merges their timecodes.
         """
         aggregated_results: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -611,8 +591,12 @@ Remember, your output MUST be valid JSON containing ONLY the 'chapters' key, wit
 # --- UPDATED Helper Function for Robust Timestamp Conversion (Keep existing logic) ---
 # Note: This will apply to chapters and tags within actionSummary
 def convert_string_timestamps_to_numeric(data):
-    """Recursively converts 'start'/'end' string values like 'X.XXXs' to numeric floats.
-    If a timecode dictionary is missing a key, logs a warning and sets the missing key to None."""
+    """Recursively converts 'start'/'end' string values (e.g., 'X.XXXs') to numeric floats.
+    If a timecode dictionary is missing an expected key ('start' or 'end'),
+    it logs a warning and sets the value of the missing key to None in the processed dictionary.
+    This function handles nested dictionaries and lists.
+    """
+    
     if isinstance(data, dict):
         is_timecode_dict = 'start' in data or 'end' in data; new_dict = {}
         for k, v in data.items():
@@ -634,9 +618,7 @@ def convert_string_timestamps_to_numeric(data):
     elif isinstance(data, list):
         processed_list = [convert_string_timestamps_to_numeric(item) for item in data]; return [item for item in processed_list if item is not None]
     else: return data
-# --- End UPDATED Helper Function ---
 
-# Add explicit type hint for VideoManifest to satisfy the forward reference
 if TYPE_CHECKING:
     from ..models.video import VideoManifest
     from ..models.environment import CobraEnvironment

@@ -19,6 +19,8 @@ import math # Add math import for duration conversion
 import cv2 # Added import
 import base64 # Added import
 from math import ceil # ADDED For token estimation
+from pathlib import Path
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,8 @@ logger = logging.getLogger(__name__)
 GPT4O_BASE      = 85      # tokens per image – low‑detail     (also the "base" for high‑detail)
 GPT4O_PER_TILE  = 170     # tokens per 512 × 512 tile – high‑detail
 
+_LOG = logging.getLogger(__name__)
+_TS_FMT = "%Y%m%d_%H%M%S"
 
 def encode_image_base64(image_path, quality=None):
     import base64
@@ -651,53 +655,35 @@ def prepare_outputs_directory(
     file_name: str,
     segment_length: int,
     frames_per_second: float,
-    output_directory: Optional[str] = None,
-    overwrite_output=False,
-    output_directory_prefix="",
-):
-
+    output_directory: str | None = None,
+    *,
+    overwrite_output: bool = False,          # keep but default False
+    output_directory_prefix: str = "",
+) -> str:
+    """
+    Return **a NEW directory** for this run.
+    Old runs are kept; only explicit `overwrite_output=True` will delete.
+    """
     if output_directory is None:
-        safe_dir_name = generate_safe_dir_name(file_name)
-        asset_directory_name = f"{output_directory_prefix}{safe_dir_name}_{frames_per_second:.2f}fps_{segment_length}sSegs_cobra"
-        asset_directory_path = os.path.join(
-            ".",
-            asset_directory_name,
-        )
-    else:
-        asset_directory_path = output_directory
+        safe_name = generate_safe_dir_name(file_name)
+        ts        = datetime.utcnow().strftime(_TS_FMT)
+        dir_name  = f"{output_directory_prefix}{safe_name}_{frames_per_second:.2f}fps_{segment_length}sSegs_{ts}_cobra"
+        output_directory = os.path.abspath(dir_name)
 
-    # Create output directory if it doesn't exist. If it does exist, check if we should overwrite it
-    if os.path.exists(asset_directory_path):
-        if overwrite_output is True:
-            print(f"Output directory {asset_directory_path} exists. Overwriting...")
-            attempts = 3
-            delay = 1 # seconds
-            for i in range(attempts):
-                try:
-                    rmtree(asset_directory_path)
-                    print("Existing directory removed successfully.")
-                    break # Exit loop if successful
-                except (OSError, ShutilError) as e:
-                    print(f"Warning: Attempt {i+1}/{attempts} failed to remove directory: {e}")
-                    if i < attempts - 1:
-                        print(f"Retrying in {delay} second(s)...")
-                        time.sleep(delay)
-                    else:
-                        print(f"ERROR: Failed to remove existing directory {asset_directory_path} after {attempts} attempts.")
-                        raise # Re-raise the last exception if all attempts fail
-            # Recreate the directory after successful removal
-            os.makedirs(asset_directory_path)
+    path = Path(output_directory)
+
+    if path.exists():
+        if overwrite_output:
+            _LOG.warning("Overwriting existing run dir %s", path)
+            shutil.rmtree(path)
         else:
-            # Directory exists but overwrite is False
             raise FileExistsError(
-                f"Directory already exists: {asset_directory_path}. If you would like to overwrite it, set overwrite_output=True"
+                f"Output directory already exists: {path}.\n"
+                "Either delete it manually or pass overwrite_output=True."
             )
-    else:
-        # Directory doesn't exist, create it
-        os.makedirs(asset_directory_path)
-        print(f"Created output directory: {asset_directory_path}")
 
-    return asset_directory_path
+    path.mkdir(parents=True)
+    return str(path)
 
 
 def get_face_client(env: CobraEnvironment) -> FaceClient:

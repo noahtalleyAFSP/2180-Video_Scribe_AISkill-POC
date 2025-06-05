@@ -137,7 +137,8 @@ async def is_same_person(
     crop_before: Optional[cv2.Mat], 
     crop_after: Optional[cv2.Mat],
     llm_client: Optional[AsyncAzureOpenAI | AsyncOpenAI],
-    llm_deployment: Optional[str]
+    llm_deployment: Optional[str],
+    prompt_log: Optional[list] = None
 ) -> Tuple[bool, float, int, int, int]:
     """
     Compares two image crops to determine if they are the same person using Vision LLM.
@@ -190,6 +191,13 @@ async def is_same_person(
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img2_b64}", "detail": "high"}}
                 ]}
             ]
+            
+            if prompt_log is not None:
+                prompt_log.append({
+                    "type": "reid_compare",
+                    "context": {"crop_before": bool(crop_before is not None), "crop_after": bool(crop_after is not None)},
+                    "messages": messages
+                })
             
             # ADDED: Retry logic for LLM call
             max_retries = 3

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import time
 from typing import List, Dict, Any, Optional, Tuple
+import logging
 
 from .models.environment import CobraEnvironment
 from .models.video import Segment # Assuming Segment objects are passed
@@ -20,7 +21,11 @@ CROP_PADDING_PERCENTAGE = 0.10 # 10% padding for crops - Keep for this module if
 # --- Helper Functions ---
 
 def _ensure_dir(directory_path: Path):
-    """Creates a directory if it doesn't exist."""
+    """Create a directory path safely – if a regular file of the same
+    name already exists we fall back to its parent and warn."""
+    if directory_path.exists() and directory_path.is_file():
+        logging.warning("%s is a file; using its parent for dir ops", directory_path)
+        directory_path = directory_path.parent
     directory_path.mkdir(parents=True, exist_ok=True)
 
 
@@ -126,7 +131,7 @@ def generate_thumbnail_for_refined_track(
     return None
 
 
-async def _call_llm_for_reid(env: CobraEnvironment, crop_before_base64: str, crop_after_base64: str, client) -> Tuple[bool, int, int, int]:
+async def _call_llm_for_reid(env: CobraEnvironment, crop_before_base64: str, crop_after_base64: str, client, prompt_log: Optional[list] = None) -> Tuple[bool, int, int, int]:
     """
     Calls the LLM for visual comparison.
     Returns: (is_same_person, prompt_tokens, completion_tokens, image_tokens)
@@ -148,6 +153,12 @@ Respond ONLY in JSON format with a single key "same_person" which is a boolean (
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_messages_content}
     ]
+    if prompt_log is not None:
+        prompt_log.append({
+            "type": "reid_compare",
+            "context": {"crop_before": bool(crop_before_base64), "crop_after": bool(crop_after_base64)},
+            "messages": messages
+        })
     prompt_tokens, completion_tokens, image_tokens = 0, 0, 0 # Initialize token counts
 
     try:
@@ -234,7 +245,10 @@ async def refine_yolo_tracks_across_scenes(
     total_reid_image_tokens = 0
     next_refined_track_numeric_id = 1
     
-    refined_thumbs_dir = Path(output_dir) / DEFAULT_THUMB_DIR_NAME
+    out_dir = Path(output_dir).resolve()                     # run-folder
+    video_manifest_path = out_dir / "_video_manifest.json"   # file, kept for later
+
+    refined_thumbs_dir = out_dir / "refined_track_thumbs"    # <-- NEW location
     if not skip_thumbnail_saving:
         _ensure_dir(refined_thumbs_dir)
     # else: print(f"[DEBUG] Skipping creation of refined_thumbs_dir due to flag.")
