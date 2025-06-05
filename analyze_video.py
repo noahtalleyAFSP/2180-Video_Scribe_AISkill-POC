@@ -54,7 +54,7 @@ async def analyze_video_async_wrapper(
     segment_duration=30.0,
     transcription_path=None,
     use_speech_based_segments=False,
-    run_async_analyzer=False, # Renamed from run_async to avoid conflict
+    run_async_analyzer=False, 
     env_file=None,
     downscale_to_max_width=None,
     downscale_to_max_height=None,
@@ -62,8 +62,9 @@ async def analyze_video_async_wrapper(
     scene_detection_threshold=30.0,
     max_concurrent_tasks=8,
     enable_language_identification: bool = False,
-    skip_refinement: bool = False, # ADDED: Flag to skip refinement for debugging
-    skip_thumbnail_saving: bool = False # ADDED: Flag to skip saving of YOLO and Re-ID thumbnails
+    skip_refinement: bool = False, 
+    skip_thumbnail_saving: bool = False,
+    overwrite_output: bool = False
 ):
     """Analyze a video using frame descriptions and OpenAI.
     This is an async wrapper to handle async client setup for track refinement.
@@ -76,15 +77,12 @@ async def analyze_video_async_wrapper(
         video_path_abs = os.path.abspath(video_path)
         video_path_obj = Path(video_path_abs)
 
-        # Create default output directory if not provided
-        if not output_dir:
-            video_name_no_ext = video_path_obj.stem
-            output_dir_path = video_path_obj.parent / f"{video_name_no_ext}_analysis"
-        else:
+        # --- NEW LOGIC: Always use timestamped output directory unless user sets --output-dir ---
+        if output_dir:
             output_dir_path = Path(output_dir)
-        
-        os.makedirs(output_dir_path, exist_ok=True)
-        output_dir_abs = str(output_dir_path.resolve())
+            output_dir_abs = str(output_dir_path.resolve())
+        else:
+            output_dir_abs = None # Pass None to preprocessor, which will create a timestamped dir
 
         # Load environment variables
         if env_file:
@@ -99,7 +97,7 @@ async def analyze_video_async_wrapper(
 
         # --- Logging configuration ---
         print(f"Analyzing video: {video_path_abs}")
-        print(f"Output directory: {output_dir_abs}")
+        print(f"Output directory: {output_dir_abs if output_dir_abs else '[Will be set by preprocessor]'}")
         print(f"Using {fps} frames per second")
         print(f"Segment duration: {segment_duration} seconds")
         
@@ -180,7 +178,7 @@ async def analyze_video_async_wrapper(
         manifest.processing_params.fps = fps
         manifest.processing_params.segment_length = segment_duration
         manifest.processing_params.use_speech_based_segments = use_speech_based_segments
-        manifest.processing_params.output_directory = output_dir_abs
+        # manifest.processing_params.output_directory will be set by preprocessor
 
         file_metadata = get_file_info(video_path_abs)
         if file_metadata is None: raise ValueError(f"Could not get video metadata for {video_path_abs}")
@@ -197,20 +195,32 @@ async def analyze_video_async_wrapper(
         # --- Step 1: Preprocessing (Scene Detection, Frame Extraction, Transcripts) --- 
         preprocessor = VideoPreProcessor(manifest, env)
         print("Starting preprocessing...")
-        preprocessor.preprocess_video(
-            output_directory=output_dir_abs,
+        asset_dir_path = preprocessor.preprocess_video(
+            output_directory=output_dir_abs, # Pass None if not set, so timestamped dir is created
             segment_length=segment_duration,
             fps=fps,
             use_scene_detection=use_scene_detection,
             scene_detection_threshold=scene_detection_threshold,
             use_speech_based_segments=use_speech_based_segments,
             generate_transcripts_flag=manifest.source_video.audio_found,
-            overwrite_output=True, # Consider making this configurable
+            overwrite_output=overwrite_output, # Pass through
             downscale_to_max_width=downscale_to_max_width,
             downscale_to_max_height=downscale_to_max_height,
             enable_language_identification=enable_language_identification
         )
         print(f"Preprocessing completed. Manifest has {len(manifest.segments)} scene segments.")
+        # Update manifest.processing_params.output_directory to the actual directory used
+        manifest.processing_params.output_directory = asset_dir_path
+        output_dir_path = Path(asset_dir_path)
+
+        # Defensive fix: ensure output_dir_path is a directory, not a file
+        if output_dir_path.is_file():
+            logging.warning(f"Output directory path determined ({output_dir_path}) was a file. "
+                            f"This might indicate an unexpected return value from the preprocessor. "
+                            f"Using its parent directory ({output_dir_path.parent}) instead.")
+            output_dir_path = output_dir_path.parent
+        
+        output_dir_abs = str(output_dir_path.resolve())
 
         # --- Step 2: Raw YOLO Object Tracking --- 
         print(f"Running raw YOLO object tracking for {video_path_abs}...")
@@ -405,6 +415,23 @@ async def analyze_video_async_wrapper(
             await analyzer_instance.close_internal_async_client()
             print("Closed VideoAnalyzer's internal async client (if any).")
 
+        # --- ADDED: Cleanup of intermediary JSON files ---
+        if output_dir_path and video_path_obj: # Ensure these are defined
+            files_to_delete = [
+                output_dir_path / f"{video_path_obj.stem}_manifest_raw_yolo_tags.json",
+                output_dir_path / f"{video_path_obj.stem}_cuts.json",
+                output_dir_path / f"{video_path_obj.stem}_reid_split_refined_yolo_tags.json", # May not always exist
+                output_dir_path / f"{video_path_obj.stem}_manifest_final_refined_yolo_tags.json" # May not always exist if refinement skipped
+            ]
+            for file_path in files_to_delete:
+                try:
+                    if file_path.exists():
+                        file_path.unlink()
+                        print(f"Cleaned up intermediary file: {file_path}")
+                except Exception as e:
+                    print(f"Warning: Could not delete intermediary file {file_path}: {e}")
+        # --- END ADDED ---
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze a video using CobraPy pipeline")
     parser.add_argument("video_path", help="Path to the video file")
@@ -440,6 +467,7 @@ if __name__ == "__main__":
     parser.add_argument("--enable-language-id", action="store_true", help="Enable Azure Batch Transcription Language ID")
     parser.add_argument("--skip-refinement", action="store_true", help="Skip the new track refinement step")
     parser.add_argument("--skip-thumbnail-saving", action="store_true", help="If set, skips saving of YOLO and Re-ID thumbnails")
+    parser.add_argument("--overwrite-output", action="store_true", help="If set, will overwrite the output directory if it exists (dangerous)")
 
     args = parser.parse_args()
     
@@ -473,5 +501,6 @@ if __name__ == "__main__":
         scene_detection_threshold=args.scene_detection_threshold,
         enable_language_identification=args.enable_language_id,
         skip_refinement=args.skip_refinement,
-        skip_thumbnail_saving=args.skip_thumbnail_saving
+        skip_thumbnail_saving=args.skip_thumbnail_saving,
+        overwrite_output=args.overwrite_output
     ))
