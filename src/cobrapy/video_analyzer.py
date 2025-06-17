@@ -1845,7 +1845,6 @@ class VideoAnalyzer:
         return out
 
     def _parse_llm_json_response(self, raw_content_str: str, expecting_chapters=True, expecting_tags=True):
-        """Parses the LLM response string, expecting JSON in a markdown block."""
         try:
             if not raw_content_str or not isinstance(raw_content_str, str):
                 logger.error("Invalid raw_content_str provided to _parse_llm_json_response.")
@@ -1880,7 +1879,7 @@ class VideoAnalyzer:
             return 0
 
     def _count_image_tokens(self, images_base64):
-        # Rough estimate: 1 token per ~4 chars for base64
+        # a rough estimate: 1 token per ~4 chars for base64
         if not images_base64:
             return 0
         if isinstance(images_base64, list):
@@ -1954,19 +1953,18 @@ class VideoAnalyzer:
             completion_key  = f"{log_token_category}_completion_tokens"
             image_key       = f"{log_token_category}_image_tokens"
 
-            # Ensure the dict has those keys (lets you add new categories without edits elsewhere)
-            for k_init in (prompt_key, completion_key, image_key): # Renamed k to k_init to avoid conflict
+    
+            for k_init in (prompt_key, completion_key, image_key): 
                 self.token_usage.setdefault(k_init, 0)
 
             self.token_usage[prompt_key]     += prompt_tokens
             self.token_usage[completion_key] += completion_tokens
             self.token_usage[image_key]      += image_tokens
 
-            # Grand totals used by the final report
-            self.token_usage["report_input_text_tokens"]  += prompt_tokens # prompt_tokens from API includes image tokens
+            self.token_usage["report_input_text_tokens"]  += prompt_tokens 
             self.token_usage["report_output_text_tokens"] += completion_tokens
-            self.token_usage["report_input_image_tokens"] += image_tokens # This is now from API or fallback
-            self.token_usage["report_total_tokens"]       += total_with_images # This is total_tokens from API
+            self.token_usage["report_input_image_tokens"] += image_tokens 
+            self.token_usage["report_total_tokens"]       += total_with_images 
             
             logger.debug(f"[TOKENS] {log_token_category}: prompt={prompt_tokens}, completion={completion_tokens}, images={image_tokens}, total={total_with_images}. Updated detailed and report totals.")
         else:
@@ -1975,7 +1973,6 @@ class VideoAnalyzer:
 
     async def _call_llm_async(self, messages, model="gpt-3.5-turbo", log_token_category=None, prompt_type=None, context=None):
         self._log_prompt(prompt_type or log_token_category or "unknown", context or {}, messages)
-        # Revert to user's original structure for async Azure/OpenAI calls
         try:
             from openai import AsyncAzureOpenAI
         except ImportError:
@@ -1986,37 +1983,34 @@ class VideoAnalyzer:
             azure_endpoint=self.env.vision.endpoint,
         )
 
-        # --- EDIT: Conditionally set max tokens parameter ---
         completion_params = {}
-        max_token_value = 5000 # Restore previous max tokens to allow larger completions
+        max_token_value = 5000
         if self.env.vision.deployment == "o4-mini":
              completion_params["max_completion_tokens"] = max_token_value
              logger.debug(f"Using 'max_completion_tokens={max_token_value}' for model '{self.env.vision.deployment}' (async)")
         else:
              completion_params["max_tokens"] = max_token_value
              logger.debug(f"Using 'max_tokens={max_token_value}' for model '{self.env.vision.deployment}' (async)")
-        # --- END EDIT ---
+     
 
-        # ---- SIZE GUARD ----
+   
         raw_body_len = len(json.dumps({"model": self.env.vision.deployment, "messages": messages}))
         if raw_body_len > 1_000_000:
             raise RuntimeError(
                 f"Request body {raw_body_len:,} B exceeds Azure 1 MB limit – cut frames or switch to image URLs."
             )
-        # ---- END SIZE GUARD ----
-
-        # 1️⃣  Estimate image tokens *before* we send the request
+    
         est_img_tokens = estimate_image_tokens(messages)
 
         response = await client.chat.completions.create(
             model=self.env.vision.deployment,
             messages=messages,
-            # --- EDIT: Use the dynamically created params dict ---
+            
             **completion_params
-            # --- END EDIT ---
+         
         )
 
-        # 2️⃣  Normal token bookkeeping as you already do
+        
         prompt_tokens = response.usage.prompt_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'prompt_tokens') else 0
         completion_tokens = response.usage.completion_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'completion_tokens') else 0
         total_tokens = response.usage.total_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'total_tokens') else prompt_tokens + completion_tokens
@@ -2133,6 +2127,7 @@ class VideoAnalyzer:
         schema_used = f"{yolo_model_name} {schema_detail} + {gpt_model_name}"
 
         report_data = {
+            "completionTimestamp": datetime.now().isoformat(),  # ADDED: Completion timestamp in ISO 8601
             "general_info": {
                 "source_asset_name": self.manifest.name,
                 "source_asset_path": self.manifest.source_video.path,
@@ -2142,7 +2137,9 @@ class VideoAnalyzer:
                 "schema_used": schema_used, # ADDED schema used
                 "analysis_config_name": analysis_config_name,
                 "run_timestamp": self.manifest.processing_params.run_timestamp,
-                "prompts_log_file": f"run_prompts_{self.manifest.processing_params.run_timestamp}.md"
+                "prompts_log_file": f"run_prompts_{self.manifest.processing_params.run_timestamp}.md",
+                # --- ADDED: Number of chapters (shots) ---
+                "num_chapters": self._count_num_chapters(final_results)
             },
             "token_usage": self.token_usage.copy(), # MODIFIED: Include the full token_usage dictionary
             "processing_time": {
@@ -2516,5 +2513,20 @@ If no actions are detected in the provided frames, return:
             "context": context,
             "messages": messages
         })
+
+    # --- ADDED: Helper to count number of chapters (shots) ---
+    def _count_num_chapters(self, final_results: dict) -> int:
+        """Counts the number of chapters (shots) in the final results for reporting."""
+        if not final_results:
+            return 0
+        # Try to find chapters in actionSummary or at top level
+        if "actionSummary" in final_results and isinstance(final_results["actionSummary"], dict):
+            chapters = final_results["actionSummary"].get("chapter", [])
+            if isinstance(chapters, list):
+                return len(chapters)
+        elif "chapters" in final_results and isinstance(final_results["chapters"], list):
+            return len(final_results["chapters"])
+        return 0
+    # --- END ADDED ---
 
 
