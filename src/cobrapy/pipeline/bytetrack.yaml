@@ -1,0 +1,17 @@
+# ----- Ultralytics ≥ 8.2.74  |  ByteTrack configuration -----
+tracker_type: bytetrack        # must be exactly 'bytetrack'
+
+# New keys introduced 2024-24-Apr
+fuse_score: true               # blend detection score into distance metric
+with_reid: false               # keep classic IoU-only ByteTrack (no appearance)
+
+# Detection / tracking thresholds
+track_thresh:       0.50       # keep a track if its det conf ≥ this
+track_high_thresh:  0.60       # high-confidence det ↔ existing track
+track_low_thresh:   0.10       # low-confidence det still eligible for match
+new_track_thresh:   0.70       # create a *new* ID if det conf ≥ this
+
+# IoU matching & lifetime
+match_thresh:       0.80       # IoU for det-↔track assignment
+track_buffer:       30         # frames to keep a lost track
+min_box_area:       10         # ignore minuscule boxes

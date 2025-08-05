@@ -10,6 +10,10 @@ class AnalysisConfig(BaseModel):
     lens_prompt: str = None
     results_template: Union[dict, List[dict], str] = Field(default_factory=list)
     outputs_prompt: str = """"""
+    PERSON_LINKING_CONFIDENCE_THRESHOLD: Optional[float] = Field(
+        0.7, 
+        description="Confidence threshold for linking LLM person names to refined track IDs during segment analysis."
+    )
 
     def generate_system_prompt_template(self, **kwargs):
         results_template_str = json.dumps(self.results_template)

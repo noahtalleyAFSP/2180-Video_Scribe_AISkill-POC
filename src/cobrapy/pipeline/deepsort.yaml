@@ -1,0 +1,13 @@
+# ----- Ultralytics ≥ 8.2.74  |  DeepSORT configuration -----
+tracker_type: deepsort
+
+# add the same new key so the parser never complains
+fuse_score: false              # DeepSORT already fuses appearance; no need here
+with_reid: true                # (kept for parity; DeepSORT always uses ReID)
+
+half: true
+det_thresh:    0.50
+max_age:       30
+min_hits:       3
+iou_threshold: 0.70
+reid_model:   osnet_x0_25      # or the full path to your custom ReID .pt
